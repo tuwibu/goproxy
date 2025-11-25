@@ -174,12 +174,26 @@ func (pm *ProxyManager) LoadProxiesFromList(proxyStrings []string) ([]int64, err
 		getNewProxyCalled := false
 		if pType == ProxyTypeTMProxy && apiKey != "" {
 			resp, err := service.GetTMProxy().GetCurrentProxy(apiKey)
-			if err != nil || (resp.Code != 0 && resp.Code != 27) {
-				continue
-			}
 
-			if resp.Code == 27 || resp.Data.Timeout == 0 {
-				if newResp, err := service.GetTMProxy().GetNewProxy(apiKey, 0, 0); err == nil && newResp.Code == 0 {
+			// Nếu GetCurrentProxy lỗi hoặc resp nil, thử GetNewProxy
+			if err != nil || resp == nil {
+				if newResp, err := service.GetTMProxy().GetNewProxy(apiKey, 0, 0); err == nil && newResp != nil && newResp.Code == 0 {
+					resp = newResp
+					getNewProxyCalled = true
+				} else {
+					continue
+				}
+			} else if resp.Code != 0 && resp.Code != 27 {
+				// Nếu Code không phải 0 hoặc 27, thử GetNewProxy
+				if newResp, err := service.GetTMProxy().GetNewProxy(apiKey, 0, 0); err == nil && newResp != nil && newResp.Code == 0 {
+					resp = newResp
+					getNewProxyCalled = true
+				} else {
+					continue
+				}
+			} else if resp.Code == 27 || resp.Data.Timeout == 0 {
+				// Nếu Code == 27 hoặc Timeout == 0, thử GetNewProxy
+				if newResp, err := service.GetTMProxy().GetNewProxy(apiKey, 0, 0); err == nil && newResp != nil && newResp.Code == 0 {
 					resp = newResp
 					getNewProxyCalled = true
 				} else {
@@ -187,12 +201,21 @@ func (pm *ProxyManager) LoadProxiesFromList(proxyStrings []string) ([]int64, err
 				}
 			}
 
-			if resp.Code == 0 {
+			// Chỉ lấy proxyStr nếu resp hợp lệ và Code == 0
+			if resp != nil && resp.Code == 0 {
 				proxyStr = fmt.Sprintf("%s:%s:%s", resp.Data.HTTPS, resp.Data.Username, resp.Data.Password)
 			}
 		}
 
-		id, err := pm.upsertProxy(pType, proxyStr, apiKey, changeUrl, minTime)
+		// Tính uniqueKey: tmproxy dùng apiKey, các loại khác dùng proxyStr
+		var uniqueKey string
+		if pType == ProxyTypeTMProxy {
+			uniqueKey = apiKey
+		} else {
+			uniqueKey = proxyStr
+		}
+
+		id, err := pm.upsertProxy(pType, proxyStr, apiKey, changeUrl, minTime, uniqueKey)
 		if err != nil {
 			return nil, err
 		}
@@ -207,14 +230,13 @@ func (pm *ProxyManager) LoadProxiesFromList(proxyStrings []string) ([]int64, err
 	return ids, nil
 }
 
-func (pm *ProxyManager) upsertProxy(pType ProxyType, proxyStr, apiKey, changeUrl string, minTime int) (int64, error) {
-	key := generateUniqueKey(proxyStr, apiKey)
+func (pm *ProxyManager) upsertProxy(pType ProxyType, proxyStr, apiKey, changeUrl string, minTime int, uniqueKey string) (int64, error) {
 	now := time.Now()
 
 	result, err := pm.db.Exec(
 		`INSERT INTO proxies (type, proxy_str, api_key, unique_key, min_time, change_url, created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		pType, proxyStr, apiKey, key, minTime, changeUrl, now, now,
+		pType, proxyStr, apiKey, uniqueKey, minTime, changeUrl, now, now,
 	)
 
 	if err == nil {
@@ -241,10 +263,10 @@ func (pm *ProxyManager) upsertProxy(pType ProxyType, proxyStr, apiKey, changeUrl
 	}
 
 	pm.db.Exec(`UPDATE proxies SET proxy_str=?, min_time=?, change_url=?, updated_at=? WHERE unique_key=?`,
-		proxyStr, minTime, changeUrl, now, key)
+		proxyStr, minTime, changeUrl, now, uniqueKey)
 
 	var id int64
-	pm.db.QueryRow(`SELECT id FROM proxies WHERE unique_key=?`, key).Scan(&id)
+	pm.db.QueryRow(`SELECT id FROM proxies WHERE unique_key=?`, uniqueKey).Scan(&id)
 	return id, nil
 }
 
@@ -327,15 +349,15 @@ func (pm *ProxyManager) GetAvailableProxy() (id int64, proxyStr string, err erro
 
 	// Static proxy: không cần change, tiếp tục đến phần acquire
 
-	// TMProxy hoặc MobileHop: kiểm tra minTime và tự động change proxy nếu đủ thời gian
-	if (p.Type == ProxyTypeTMProxy || p.Type == ProxyTypeMobileHop) && p.MinTime > 0 {
-		now := time.Now()
+	now := time.Now()
+
+	// TMProxy: kiểm tra minTime và tự động change proxy nếu đủ thời gian
+	if p.Type == ProxyTypeTMProxy && p.MinTime > 0 {
 		timeSinceLastChange := now.Sub(p.LastChanged).Seconds()
 
-		// Nếu chưa đủ minTime, continue đến acquire
+		// Nếu đủ minTime, gọi change proxy
 		if timeSinceLastChange >= float64(p.MinTime) {
-			// Đã đủ minTime, gọi change proxy
-			if p.Type == ProxyTypeTMProxy && p.ApiKey != "" {
+			if p.ApiKey != "" {
 				// TMProxy: gọi GetNewProxy
 				resp, err := service.GetTMProxy().GetNewProxy(p.ApiKey, 0, 0)
 				if err != nil {
@@ -388,48 +410,52 @@ func (pm *ProxyManager) GetAvailableProxy() (id int64, proxyStr string, err erro
 				if pm.changeProxyWaitTime > 0 {
 					time.Sleep(pm.changeProxyWaitTime)
 				}
+			}
+		}
+	}
 
-			} else if p.Type == ProxyTypeMobileHop && p.ChangeUrl != "" {
-				// MobileHop: gọi callChangeURL
-				if err := pm.callChangeURL(context.Background(), p.ChangeUrl); err != nil {
-					// callChangeURL thất bại - đánh dấu error và trả về
-					errMsg := fmt.Sprintf("callChangeURL failed: %v", err)
-					pm.mu.Lock()
-					pm.db.Exec(`UPDATE proxies SET error=?, updated_at=? WHERE id=?`, errMsg, now, p.ID)
-					if cached, ok := pm.proxyCache[p.ID]; ok {
-						cached.Error = errMsg
-						cached.UpdatedAt = now
-					}
-					pm.mu.Unlock()
-					return 0, "", fmt.Errorf("%s", errMsg)
-				}
-
-				// callChangeURL thành công - update last_changed, reset used và clear error
+	// MobileHop: kiểm tra used gần maxUsed và tự động change proxy nếu gần cuối
+	if p.Type == ProxyTypeMobileHop && p.ChangeUrl != "" {
+		// Nếu used gần bằng maxUsed (còn 1 lần nữa là hết), thực hiện change proxy
+		if p.Used >= pm.maxUsed-1 {
+			// Gọi callChangeURL
+			if err := pm.callChangeURL(context.Background(), p.ChangeUrl); err != nil {
+				// callChangeURL thất bại - đánh dấu error và trả về
+				errMsg := fmt.Sprintf("callChangeURL failed: %v", err)
 				pm.mu.Lock()
-				pm.db.Exec(`UPDATE proxies SET last_changed=?, used=0, error='', updated_at=? WHERE id=?`, now, now, p.ID)
+				pm.db.Exec(`UPDATE proxies SET error=?, updated_at=? WHERE id=?`, errMsg, now, p.ID)
 				if cached, ok := pm.proxyCache[p.ID]; ok {
-					cached.LastChanged = now
-					cached.Used = 0
-					cached.Error = ""
+					cached.Error = errMsg
 					cached.UpdatedAt = now
 				}
 				pm.mu.Unlock()
+				return 0, "", fmt.Errorf("%s", errMsg)
+			}
 
-				p.LastChanged = now
-				p.Used = 0
-				p.Error = ""
-				p.UpdatedAt = now
+			// callChangeURL thành công - update last_changed, reset used và clear error
+			pm.mu.Lock()
+			pm.db.Exec(`UPDATE proxies SET last_changed=?, used=0, error='', updated_at=? WHERE id=?`, now, now, p.ID)
+			if cached, ok := pm.proxyCache[p.ID]; ok {
+				cached.LastChanged = now
+				cached.Used = 0
+				cached.Error = ""
+				cached.UpdatedAt = now
+			}
+			pm.mu.Unlock()
 
-				// Đợi ChangeProxyWaitTime trước khi trả result
-				if pm.changeProxyWaitTime > 0 {
-					time.Sleep(pm.changeProxyWaitTime)
-				}
+			p.LastChanged = now
+			p.Used = 0
+			p.Error = ""
+			p.UpdatedAt = now
+
+			// Đợi ChangeProxyWaitTime trước khi trả result
+			if pm.changeProxyWaitTime > 0 {
+				time.Sleep(pm.changeProxyWaitTime)
 			}
 		}
 	}
 
 	// Tự động gọi AcquireProxy để set running=true, used+=1
-	now := time.Now()
 	pm.mu.Lock()
 	if _, err := pm.db.Exec(`UPDATE proxies SET running=true, used=used+1, updated_at=? WHERE id=?`, now, p.ID); err != nil {
 		pm.mu.Unlock()
