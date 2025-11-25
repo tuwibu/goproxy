@@ -32,7 +32,7 @@ type TMProxyData struct {
 	HTTPS        string `json:"https"`
 	Timeout      int    `json:"timeout"`
 	NextRequest  int    `json:"next_request"`
-	ExpiredAt    int64  `json:"expired_at"`
+	ExpiredAt    string `json:"expired_at"`
 }
 
 // TMProxy service để interact với TMProxy API (Singleton)

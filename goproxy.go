@@ -25,22 +25,22 @@ type Proxy struct {
 	ApiKey      string
 	ChangeUrl   string
 	MinTime     int  // thời gian tối thiểu giữa các lần thay đổi (giây)
-	Used        bool // cờ chỉ proxy có đang được sử dụng hay không
-	Count       int  // số lần proxy đã được sử dụng
+	Running     bool // cờ chỉ proxy có đang được sử dụng hay không
+	Used        int  // số lần proxy đã được sử dụng
 	LastChanged time.Time
 	LastIP      string
+	Error       string // lỗi nếu GetNewProxy thất bại
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 }
-
 
 // ProxyManager quản lý danh sách proxy (Singleton)
 type ProxyManager struct {
 	ctx                 context.Context
 	db                  *sql.DB
 	mu                  sync.RWMutex
-	waitProxyChange     bool
 	changeProxyWaitTime time.Duration
+	maxUsed             int
 	proxyCache          map[int64]*Proxy
 	initialized         bool
 }
@@ -81,13 +81,6 @@ func newProxyManager(ctx context.Context) (*ProxyManager, error) {
 	return pm, nil
 }
 
-type Config struct {
-	WaitProxyChange     bool
-	ChangeProxyWaitTime time.Duration
-	ProxyStrings        []string
-	ClearAllProxy       bool
-}
-
 func (pm *ProxyManager) validateProxyType(t ProxyType) error {
 	switch t {
 	case ProxyTypeTMProxy, ProxyTypeStatic, ProxyTypeMobileHop:
@@ -96,61 +89,38 @@ func (pm *ProxyManager) validateProxyType(t ProxyType) error {
 	return fmt.Errorf("invalid type: %s", t)
 }
 
+type Config struct {
+	ChangeProxyWaitTime time.Duration
+	ProxyStrings        []string
+	ClearAllProxy       bool
+	MaxUsed             int
+}
+
 func (pm *ProxyManager) SetConfig(config Config) error {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
-	pm.waitProxyChange = config.WaitProxyChange
 	pm.changeProxyWaitTime = config.ChangeProxyWaitTime
 
-	// Nếu ClearAllProxy = true, xóa tất cả proxy trước
 	if config.ClearAllProxy {
-		_, err := pm.db.Exec("DELETE FROM proxies")
-		if err != nil {
-			return fmt.Errorf("failed to clear proxies: %w", err)
-		}
+		pm.db.Exec("DELETE FROM proxies")
 		pm.proxyCache = make(map[int64]*Proxy)
+	} else {
+		// Reset tất cả proxy: used=0, running=false, error=''
+		pm.db.Exec("UPDATE proxies SET used=0, running=false, error='', updated_at=?", time.Now())
+		for _, p := range pm.proxyCache {
+			p.Used = 0
+			p.Running = false
+			p.Error = ""
+			p.UpdatedAt = time.Now()
+		}
 	}
 
 	_, err := pm.LoadProxiesFromList(config.ProxyStrings)
 	if err != nil {
 		return fmt.Errorf("failed to load proxies: %w", err)
 	}
+
+	// Lưu MaxUsed vào ProxyManager (thêm field mới)
+	pm.maxUsed = config.MaxUsed
 	return nil
-}
-
-// WaitProxyChange chờ proxy thay đổi IP hoặc tự động gọi change API
-func (pm *ProxyManager) WaitProxyChange(ctx context.Context, proxy *Proxy, proxyStr string, auto bool) (string, error) {
-	if proxy.Type == ProxyTypeStatic {
-		return "", fmt.Errorf("static proxy cannot change IP")
-	}
-
-	if _, err := parseProxyString(proxyStr); err != nil {
-		return "", err
-	}
-
-	initialResp, err := CheckProxy(ctx, proxyStr)
-	if err != nil {
-		return "", err
-	}
-
-	// MobileHop luôn gọi change_url
-	if proxy.Type == ProxyTypeMobileHop || auto {
-		if proxy.ChangeUrl == "" {
-			return "", fmt.Errorf("no change_url configured")
-		}
-		if err := pm.callChangeURL(ctx, proxy.ChangeUrl); err != nil {
-			return "", err
-		}
-		return pm.waitForIPChange(ctx, proxyStr, initialResp.Query, 300*time.Second)
-	}
-
-	// auto=false: check LastIP
-	p, err := pm.GetProxyByID(proxy.ID)
-	if err != nil {
-		return "", err
-	}
-	if p.LastIP != "" && p.LastIP != initialResp.Query {
-		return p.LastIP, nil
-	}
-	return "", fmt.Errorf("IP not changed")
 }

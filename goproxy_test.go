@@ -15,22 +15,46 @@ func TestProxyManager(t *testing.T) {
 	defer pm.Close()
 
 	err = pm.SetConfig(Config{
-		WaitProxyChange:     true,
 		ChangeProxyWaitTime: 10 * time.Second,
-		ProxyStrings:        []string{"tmproxy|apiKey123|456"},
-		ClearAllProxy:       true,
+		ProxyStrings:        []string{"tmproxy|19bf363d47582f77ba57283b6a6b2b88|241"}, // static proxy - ko gọi GetNewProxy
+		ClearAllProxy:       false,
+		MaxUsed:             10,
 	})
 
 	if err != nil {
 		t.Fatalf("failed to set config: %v", err)
 	}
 
-	proxies, err := pm.GetAllProxies()
+	// Test GetAvailableProxy (tự động gọi AcquireProxy, trả id + proxyStr)
+	fmt.Println("\n=== GetAvailableProxy ===")
+	proxyID, proxyStr, err := pm.GetAvailableProxy()
 	if err != nil {
-		t.Fatalf("failed to get all proxies: %v", err)
+		t.Fatalf("failed to get available proxy: %v", err)
 	}
+	fmt.Printf("ID=%d, ProxyStr=%s\n", proxyID, proxyStr)
 
-	for _, proxy := range proxies {
-		fmt.Printf("proxy: %+v\n", proxy)
+	// Check state
+	p, _ := pm.GetProxyByID(proxyID)
+	fmt.Printf("After GetAvailableProxy: running=%v, used=%d\n", p.Running, p.Used)
+
+	// Test ReleaseProxy
+	fmt.Println("\n=== Test ReleaseProxy ===")
+	if err := pm.ReleaseProxy(proxyID); err != nil {
+		t.Fatalf("failed to release proxy: %v", err)
+	}
+	p, _ = pm.GetProxyByID(proxyID)
+	fmt.Printf("After ReleaseProxy: running=%v, used=%d\n", p.Running, p.Used)
+
+	// Test GetAvailableProxy lần 2
+	fmt.Println("\n=== GetAvailableProxy (2nd call) ===")
+	proxyID2, proxyStr2, err := pm.GetAvailableProxy()
+	if err != nil {
+		t.Fatalf("failed to get available proxy 2nd time: %v", err)
+	}
+	fmt.Printf("ID=%d, ProxyStr=%s\n", proxyID2, proxyStr2)
+
+	// Release lại
+	if err := pm.ReleaseProxy(proxyID2); err != nil {
+		t.Fatalf("failed to release proxy 2nd time: %v", err)
 	}
 }

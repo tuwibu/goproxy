@@ -1,6 +1,7 @@
 package goproxy
 
 import (
+	"context"
 	"crypto/md5"
 	"database/sql"
 	"fmt"
@@ -34,10 +35,11 @@ func (pm *ProxyManager) initSchema() error {
 		unique_key TEXT UNIQUE,
 		min_time INTEGER,
 		change_url TEXT,
-		used BOOLEAN DEFAULT false,
-		count INTEGER DEFAULT 0,
+		running BOOLEAN DEFAULT false,
+		used INTEGER DEFAULT 0,
 		last_changed DATETIME,
 		last_ip TEXT,
+		error TEXT,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);
@@ -71,9 +73,9 @@ func (pm *ProxyManager) AcquireProxy(id int64) error {
 	defer pm.mu.Unlock()
 
 	now := time.Now()
-	pm.db.Exec(`UPDATE proxies SET used=true, count=count+1, updated_at=? WHERE id=?`, now, id)
+	pm.db.Exec(`UPDATE proxies SET running=true, used=used+1, updated_at=? WHERE id=?`, now, id)
 	if p, ok := pm.proxyCache[id]; ok {
-		p.Used, p.Count, p.UpdatedAt = true, p.Count+1, now
+		p.Running, p.Used, p.UpdatedAt = true, p.Used+1, now
 	}
 	return nil
 }
@@ -83,27 +85,24 @@ func (pm *ProxyManager) ReleaseProxy(id int64) error {
 	defer pm.mu.Unlock()
 
 	now := time.Now()
-	pm.db.Exec(`UPDATE proxies SET used=false, updated_at=? WHERE id=?`, now, id)
+	pm.db.Exec(`UPDATE proxies SET running=false, updated_at=? WHERE id=?`, now, id)
 	if p, ok := pm.proxyCache[id]; ok {
-		p.Used, p.UpdatedAt = false, now
+		p.Running, p.UpdatedAt = false, now
 	}
 	return nil
 }
 
 func (pm *ProxyManager) GetProxyByID(id int64) (*Proxy, error) {
 	pm.mu.RLock()
-	defer pm.mu.RUnlock()
-
-	if p, ok := pm.proxyCache[id]; ok {
-		return p, nil
-	}
-
 	var p Proxy
 	var lastIP sql.NullString
+	var lastChanged sql.NullTime
+	var errStr sql.NullString
 	err := pm.db.QueryRow(`
-		SELECT id, type, proxy_str, api_key, change_url, min_time, used, count, last_ip, created_at, updated_at
+		SELECT id, type, proxy_str, api_key, change_url, min_time, running, used, last_ip, last_changed, error, created_at, updated_at
 		FROM proxies WHERE id = ?
-	`, id).Scan(&p.ID, &p.Type, &p.ProxyStr, &p.ApiKey, &p.ChangeUrl, &p.MinTime, &p.Used, &p.Count, &lastIP, &p.CreatedAt, &p.UpdatedAt)
+	`, id).Scan(&p.ID, &p.Type, &p.ProxyStr, &p.ApiKey, &p.ChangeUrl, &p.MinTime, &p.Running, &p.Used, &lastIP, &lastChanged, &errStr, &p.CreatedAt, &p.UpdatedAt)
+	pm.mu.RUnlock()
 
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -115,6 +114,18 @@ func (pm *ProxyManager) GetProxyByID(id int64) (*Proxy, error) {
 	if lastIP.Valid {
 		p.LastIP = lastIP.String
 	}
+	if lastChanged.Valid {
+		p.LastChanged = lastChanged.Time
+	}
+	if errStr.Valid {
+		p.Error = errStr.String
+	}
+
+	// Update cache với latest data từ database
+	pm.mu.Lock()
+	pm.proxyCache[id] = &p
+	pm.mu.Unlock()
+
 	return &p, nil
 }
 
@@ -160,6 +171,7 @@ func (pm *ProxyManager) LoadProxiesFromList(proxyStrings []string) ([]int64, err
 		}
 
 		// TMProxy: lấy proxy từ API
+		getNewProxyCalled := false
 		if pType == ProxyTypeTMProxy && apiKey != "" {
 			resp, err := service.GetTMProxy().GetCurrentProxy(apiKey)
 			if err != nil || (resp.Code != 0 && resp.Code != 27) {
@@ -169,6 +181,7 @@ func (pm *ProxyManager) LoadProxiesFromList(proxyStrings []string) ([]int64, err
 			if resp.Code == 27 || resp.Data.Timeout == 0 {
 				if newResp, err := service.GetTMProxy().GetNewProxy(apiKey, 0, 0); err == nil && newResp.Code == 0 {
 					resp = newResp
+					getNewProxyCalled = true
 				} else {
 					continue
 				}
@@ -183,6 +196,11 @@ func (pm *ProxyManager) LoadProxiesFromList(proxyStrings []string) ([]int64, err
 		if err != nil {
 			return nil, err
 		}
+
+		if getNewProxyCalled {
+			pm.db.Exec(`UPDATE proxies SET last_changed=? WHERE id=?`, time.Now(), id)
+		}
+
 		ids = append(ids, id)
 	}
 
@@ -201,15 +219,19 @@ func (pm *ProxyManager) upsertProxy(pType ProxyType, proxyStr, apiKey, changeUrl
 
 	if err == nil {
 		id, _ := result.LastInsertId()
+		pm.db.Exec(`UPDATE proxies SET last_changed=? WHERE id=?`, now, id)
 		pm.proxyCache[id] = &Proxy{
-			ID:        id,
-			Type:      pType,
-			ProxyStr:  proxyStr,
-			ApiKey:    apiKey,
-			ChangeUrl: changeUrl,
-			MinTime:   minTime,
-			CreatedAt: now,
-			UpdatedAt: now,
+			ID:          id,
+			Type:        pType,
+			ProxyStr:    proxyStr,
+			ApiKey:      apiKey,
+			ChangeUrl:   changeUrl,
+			MinTime:     minTime,
+			Running:     false,
+			Used:        0,
+			LastChanged: now,
+			CreatedAt:   now,
+			UpdatedAt:   now,
 		}
 		return id, nil
 	}
@@ -231,7 +253,7 @@ func (pm *ProxyManager) GetAllProxies() ([]*Proxy, error) {
 	defer pm.mu.RUnlock()
 
 	rows, err := pm.db.Query(`
-		SELECT id, type, proxy_str, api_key, change_url, min_time, used, count, last_ip, created_at, updated_at
+		SELECT id, type, proxy_str, api_key, change_url, min_time, running, used, last_ip, last_changed, error, created_at, updated_at
 		FROM proxies ORDER BY created_at DESC
 	`)
 	if err != nil {
@@ -243,12 +265,182 @@ func (pm *ProxyManager) GetAllProxies() ([]*Proxy, error) {
 	for rows.Next() {
 		var p Proxy
 		var lastIP sql.NullString
-		rows.Scan(&p.ID, &p.Type, &p.ProxyStr, &p.ApiKey, &p.ChangeUrl, &p.MinTime, &p.Used, &p.Count, &lastIP, &p.CreatedAt, &p.UpdatedAt)
+		var lastChanged sql.NullTime
+		var errStr sql.NullString
+		rows.Scan(&p.ID, &p.Type, &p.ProxyStr, &p.ApiKey, &p.ChangeUrl, &p.MinTime, &p.Running, &p.Used, &lastIP, &lastChanged, &errStr, &p.CreatedAt, &p.UpdatedAt)
 		if lastIP.Valid {
 			p.LastIP = lastIP.String
+		}
+		if lastChanged.Valid {
+			p.LastChanged = lastChanged.Time
+		}
+		if errStr.Valid {
+			p.Error = errStr.String
 		}
 		proxies = append(proxies, &p)
 	}
 
 	return proxies, rows.Err()
+}
+
+func (pm *ProxyManager) GetAvailableProxy() (id int64, proxyStr string, err error) {
+	pm.mu.RLock()
+	rows, err := pm.db.Query(`
+		SELECT id, type, proxy_str, api_key, change_url, min_time, running, used, last_ip, last_changed, error, created_at, updated_at
+		FROM proxies WHERE running=false AND used<? AND (error IS NULL OR error='')
+		ORDER BY RANDOM()
+		LIMIT 1
+	`, pm.maxUsed)
+
+	if err != nil {
+		pm.mu.RUnlock()
+		return 0, "", err
+	}
+
+	if !rows.Next() {
+		rows.Close()
+		pm.mu.RUnlock()
+		return 0, "", fmt.Errorf("no available proxy")
+	}
+
+	var p Proxy
+	var lastIP sql.NullString
+	var lastChanged sql.NullTime
+	var errStr sql.NullString
+	err = rows.Scan(&p.ID, &p.Type, &p.ProxyStr, &p.ApiKey, &p.ChangeUrl, &p.MinTime, &p.Running, &p.Used, &lastIP, &lastChanged, &errStr, &p.CreatedAt, &p.UpdatedAt)
+	rows.Close()
+	pm.mu.RUnlock()
+
+	if err != nil {
+		return 0, "", err
+	}
+
+	if lastIP.Valid {
+		p.LastIP = lastIP.String
+	}
+	if lastChanged.Valid {
+		p.LastChanged = lastChanged.Time
+	}
+	if errStr.Valid {
+		p.Error = errStr.String
+	}
+
+	// Static proxy: không cần change, tiếp tục đến phần acquire
+
+	// TMProxy hoặc MobileHop: kiểm tra minTime và tự động change proxy nếu đủ thời gian
+	if (p.Type == ProxyTypeTMProxy || p.Type == ProxyTypeMobileHop) && p.MinTime > 0 {
+		now := time.Now()
+		timeSinceLastChange := now.Sub(p.LastChanged).Seconds()
+
+		// Nếu chưa đủ minTime, continue đến acquire
+		if timeSinceLastChange >= float64(p.MinTime) {
+			// Đã đủ minTime, gọi change proxy
+			if p.Type == ProxyTypeTMProxy && p.ApiKey != "" {
+				// TMProxy: gọi GetNewProxy
+				resp, err := service.GetTMProxy().GetNewProxy(p.ApiKey, 0, 0)
+				if err != nil {
+					// GetNewProxy thất bại - đánh dấu error và trả về
+					errMsg := fmt.Sprintf("GetNewProxy failed: %v", err)
+					pm.mu.Lock()
+					pm.db.Exec(`UPDATE proxies SET error=?, updated_at=? WHERE id=?`, errMsg, now, p.ID)
+					if cached, ok := pm.proxyCache[p.ID]; ok {
+						cached.Error = errMsg
+						cached.UpdatedAt = now
+					}
+					pm.mu.Unlock()
+					return 0, "", fmt.Errorf("%s", errMsg)
+				}
+
+				if resp.Code != 0 {
+					// API trả về error code - đánh dấu error và trả về
+					errMsg := fmt.Sprintf("tmproxy api returned code: %d, message: %s", resp.Code, resp.Message)
+					pm.mu.Lock()
+					pm.db.Exec(`UPDATE proxies SET error=?, updated_at=? WHERE id=?`, errMsg, now, p.ID)
+					if cached, ok := pm.proxyCache[p.ID]; ok {
+						cached.Error = errMsg
+						cached.UpdatedAt = now
+					}
+					pm.mu.Unlock()
+					return 0, "", fmt.Errorf("%s", errMsg)
+				}
+
+				// GetNewProxy thành công - update proxy mới, reset used và clear error
+				newProxyStr := fmt.Sprintf("%s:%s:%s", resp.Data.HTTPS, resp.Data.Username, resp.Data.Password)
+
+				pm.mu.Lock()
+				pm.db.Exec(`UPDATE proxies SET proxy_str=?, last_changed=?, used=0, error='', updated_at=? WHERE id=?`, newProxyStr, now, now, p.ID)
+				if cached, ok := pm.proxyCache[p.ID]; ok {
+					cached.ProxyStr = newProxyStr
+					cached.LastChanged = now
+					cached.Used = 0
+					cached.Error = ""
+					cached.UpdatedAt = now
+				}
+				pm.mu.Unlock()
+
+				p.ProxyStr = newProxyStr
+				p.LastChanged = now
+				p.Used = 0
+				p.Error = ""
+				p.UpdatedAt = now
+
+				// Đợi ChangeProxyWaitTime trước khi trả result
+				if pm.changeProxyWaitTime > 0 {
+					time.Sleep(pm.changeProxyWaitTime)
+				}
+
+			} else if p.Type == ProxyTypeMobileHop && p.ChangeUrl != "" {
+				// MobileHop: gọi callChangeURL
+				if err := pm.callChangeURL(context.Background(), p.ChangeUrl); err != nil {
+					// callChangeURL thất bại - đánh dấu error và trả về
+					errMsg := fmt.Sprintf("callChangeURL failed: %v", err)
+					pm.mu.Lock()
+					pm.db.Exec(`UPDATE proxies SET error=?, updated_at=? WHERE id=?`, errMsg, now, p.ID)
+					if cached, ok := pm.proxyCache[p.ID]; ok {
+						cached.Error = errMsg
+						cached.UpdatedAt = now
+					}
+					pm.mu.Unlock()
+					return 0, "", fmt.Errorf("%s", errMsg)
+				}
+
+				// callChangeURL thành công - update last_changed, reset used và clear error
+				pm.mu.Lock()
+				pm.db.Exec(`UPDATE proxies SET last_changed=?, used=0, error='', updated_at=? WHERE id=?`, now, now, p.ID)
+				if cached, ok := pm.proxyCache[p.ID]; ok {
+					cached.LastChanged = now
+					cached.Used = 0
+					cached.Error = ""
+					cached.UpdatedAt = now
+				}
+				pm.mu.Unlock()
+
+				p.LastChanged = now
+				p.Used = 0
+				p.Error = ""
+				p.UpdatedAt = now
+
+				// Đợi ChangeProxyWaitTime trước khi trả result
+				if pm.changeProxyWaitTime > 0 {
+					time.Sleep(pm.changeProxyWaitTime)
+				}
+			}
+		}
+	}
+
+	// Tự động gọi AcquireProxy để set running=true, used+=1
+	now := time.Now()
+	pm.mu.Lock()
+	if _, err := pm.db.Exec(`UPDATE proxies SET running=true, used=used+1, updated_at=? WHERE id=?`, now, p.ID); err != nil {
+		pm.mu.Unlock()
+		return 0, "", fmt.Errorf("failed to acquire proxy: %v", err)
+	}
+	if cached, ok := pm.proxyCache[p.ID]; ok {
+		cached.Running = true
+		cached.Used = cached.Used + 1
+		cached.UpdatedAt = now
+	}
+	pm.mu.Unlock()
+
+	return p.ID, p.ProxyStr, nil
 }
