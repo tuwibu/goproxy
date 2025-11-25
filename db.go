@@ -92,43 +92,6 @@ func (pm *ProxyManager) ReleaseProxy(id int64) error {
 	return nil
 }
 
-func (pm *ProxyManager) GetProxyByID(id int64) (*Proxy, error) {
-	pm.mu.RLock()
-	var p Proxy
-	var lastIP sql.NullString
-	var lastChanged sql.NullTime
-	var errStr sql.NullString
-	err := pm.db.QueryRow(`
-		SELECT id, type, proxy_str, api_key, change_url, min_time, running, used, last_ip, last_changed, error, created_at, updated_at
-		FROM proxies WHERE id = ?
-	`, id).Scan(&p.ID, &p.Type, &p.ProxyStr, &p.ApiKey, &p.ChangeUrl, &p.MinTime, &p.Running, &p.Used, &lastIP, &lastChanged, &errStr, &p.CreatedAt, &p.UpdatedAt)
-	pm.mu.RUnlock()
-
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("not found")
-		}
-		return nil, err
-	}
-
-	if lastIP.Valid {
-		p.LastIP = lastIP.String
-	}
-	if lastChanged.Valid {
-		p.LastChanged = lastChanged.Time
-	}
-	if errStr.Valid {
-		p.Error = errStr.String
-	}
-
-	// Update cache với latest data từ database
-	pm.mu.Lock()
-	pm.proxyCache[id] = &p
-	pm.mu.Unlock()
-
-	return &p, nil
-}
-
 func (pm *ProxyManager) LoadProxiesFromList(proxyStrings []string) ([]int64, error) {
 	var ids []int64
 
@@ -268,41 +231,6 @@ func (pm *ProxyManager) upsertProxy(pType ProxyType, proxyStr, apiKey, changeUrl
 	var id int64
 	pm.db.QueryRow(`SELECT id FROM proxies WHERE unique_key=?`, uniqueKey).Scan(&id)
 	return id, nil
-}
-
-func (pm *ProxyManager) GetAllProxies() ([]*Proxy, error) {
-	pm.mu.RLock()
-	defer pm.mu.RUnlock()
-
-	rows, err := pm.db.Query(`
-		SELECT id, type, proxy_str, api_key, change_url, min_time, running, used, last_ip, last_changed, error, created_at, updated_at
-		FROM proxies ORDER BY created_at DESC
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var proxies []*Proxy
-	for rows.Next() {
-		var p Proxy
-		var lastIP sql.NullString
-		var lastChanged sql.NullTime
-		var errStr sql.NullString
-		rows.Scan(&p.ID, &p.Type, &p.ProxyStr, &p.ApiKey, &p.ChangeUrl, &p.MinTime, &p.Running, &p.Used, &lastIP, &lastChanged, &errStr, &p.CreatedAt, &p.UpdatedAt)
-		if lastIP.Valid {
-			p.LastIP = lastIP.String
-		}
-		if lastChanged.Valid {
-			p.LastChanged = lastChanged.Time
-		}
-		if errStr.Valid {
-			p.Error = errStr.String
-		}
-		proxies = append(proxies, &p)
-	}
-
-	return proxies, rows.Err()
 }
 
 func (pm *ProxyManager) GetAvailableProxy() (id int64, proxyStr string, err error) {

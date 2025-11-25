@@ -37,10 +37,6 @@ func TestProxyManager(t *testing.T) {
 	}
 	fmt.Printf("ID=%d, ProxyStr=%s\n", proxyID, proxyStr)
 
-	// Check state
-	p, _ := pm.GetProxyByID(proxyID)
-	fmt.Printf("After GetAvailableProxy: running=%v, used=%d\n", p.Running, p.Used)
-
 	for i := 0; i < 100; i++ {
 		// Test GetAvailableProxy lần 2
 		fmt.Println("\n=== GetAvailableProxy (2nd call) ===")
