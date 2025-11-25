@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"goproxy/service"
+	"github.com/tuwibu/goproxy/service"
 
 	_ "modernc.org/sqlite"
 )

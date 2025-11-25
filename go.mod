@@ -1,4 +1,4 @@
-module goproxy
+module github.com/tuwibu/goproxy
 
 go 1.25.3
 
