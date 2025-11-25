@@ -2,7 +2,6 @@ package goproxy
 
 import (
 	"context"
-	"crypto/md5"
 	"database/sql"
 	"fmt"
 	"strconv"
@@ -49,33 +48,11 @@ func (pm *ProxyManager) initSchema() error {
 	return err
 }
 
-func generateUniqueKey(proxyStr, apiKey string) string {
-	data := apiKey
-	if apiKey == "" {
-		data = proxyStr
-	} else if proxyStr != "" {
-		data = proxyStr + "-" + apiKey
-	}
-	return fmt.Sprintf("%x", md5.Sum([]byte(data)))
-}
-
 func (pm *ProxyManager) Close() error {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	if pm.db != nil {
 		return pm.db.Close()
-	}
-	return nil
-}
-
-func (pm *ProxyManager) AcquireProxy(id int64) error {
-	pm.mu.Lock()
-	defer pm.mu.Unlock()
-
-	now := time.Now()
-	pm.db.Exec(`UPDATE proxies SET running=true, used=used+1, updated_at=? WHERE id=?`, now, id)
-	if p, ok := pm.proxyCache[id]; ok {
-		p.Running, p.Used, p.UpdatedAt = true, p.Used+1, now
 	}
 	return nil
 }
@@ -383,7 +360,7 @@ func (pm *ProxyManager) GetAvailableProxy() (id int64, proxyStr string, err erro
 		}
 	}
 
-	// Tự động gọi AcquireProxy để set running=true, used+=1
+	// Tự động gọi acquireProxy để set running=true, used+=1
 	pm.mu.Lock()
 	if _, err := pm.db.Exec(`UPDATE proxies SET running=true, used=used+1, updated_at=? WHERE id=?`, now, p.ID); err != nil {
 		pm.mu.Unlock()
