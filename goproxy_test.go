@@ -16,7 +16,8 @@ func TestProxyManager(t *testing.T) {
 	err = pm.SetConfig(Config{
 		WaitProxyChange:     true,
 		ChangeProxyWaitTime: 10 * time.Second,
-		ProxyStrings:        []string{"tmproxy|apiKey123"},
+		ProxyStrings:        []string{"tmproxy|apiKey123|456"},
+		ClearAllProxy:       true,
 	})
 
 	if err != nil {

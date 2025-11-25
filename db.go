@@ -1,6 +1,7 @@
 package goproxy
 
 import (
+	"crypto/md5"
 	"database/sql"
 	"fmt"
 
@@ -29,6 +30,11 @@ func (pm *ProxyManager) initSchema() error {
 		type TEXT NOT NULL,
 		proxy_str TEXT,
 		api_key TEXT,
+		unique_key TEXT UNIQUE,
+		min_time INTEGER,
+		change_url TEXT,
+		used BOOLEAN DEFAULT false,
+		count INTEGER DEFAULT 0,
 		last_changed DATETIME,
 		last_ip TEXT,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -36,66 +42,31 @@ func (pm *ProxyManager) initSchema() error {
 	);
 	CREATE INDEX IF NOT EXISTS idx_type ON proxies(type);
 	CREATE INDEX IF NOT EXISTS idx_created ON proxies(created_at);
+	CREATE INDEX IF NOT EXISTS idx_unique_key ON proxies(unique_key);
+	CREATE INDEX IF NOT EXISTS idx_used ON proxies(used);
 	`
 
 	_, err := pm.db.Exec(schema)
 	return err
 }
 
-// AddProxyInput input struct để thêm proxy
-type AddProxyInput struct {
-	Type      ProxyType
-	ProxyStr  *string // nullable
-	ApiKey    *string // nullable
-	ChangeUrl string
-}
+// generateUniqueKey tạo MD5 hash từ apiKey hoặc proxyStr
+func generateUniqueKey(proxyStr, apiKey string) string {
+	var data string
 
-// addProxy thêm proxy mới vào danh sách (private)
-func (pm *ProxyManager) addProxy(input AddProxyInput) (*Proxy, error) {
-	pm.mu.Lock()
-	defer pm.mu.Unlock()
-
-	// Validate type
-	if err := pm.validateProxyType(input.Type); err != nil {
-		return nil, err
+	if apiKey != "" && proxyStr != "" {
+		// Cả 2: nối proxyStr-apiKey
+		data = proxyStr + "-" + apiKey
+	} else if apiKey != "" {
+		// Chỉ apiKey
+		data = apiKey
+	} else {
+		// Chỉ proxyStr
+		data = proxyStr
 	}
 
-	// Handle nullable fields
-	proxyStr := ""
-	if input.ProxyStr != nil {
-		proxyStr = *input.ProxyStr
-	}
-	apiKey := ""
-	if input.ApiKey != nil {
-		apiKey = *input.ApiKey
-	}
-
-	result, err := pm.db.Exec(
-		`INSERT INTO proxies (type, proxy_str, api_key, created_at, updated_at)
-		 VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-		input.Type, proxyStr, apiKey,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to insert proxy: %w", err)
-	}
-
-	id, err := result.LastInsertId()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get last insert id: %w", err)
-	}
-
-	proxy := &Proxy{
-		ID:        id,
-		Type:      input.Type,
-		ProxyStr:  proxyStr,
-		ApiKey:    apiKey,
-		ChangeUrl: input.ChangeUrl,
-		CreatedAt: timeNow(),
-		UpdatedAt: timeNow(),
-	}
-
-	pm.proxyCache[id] = proxy
-	return proxy, nil
+	hash := md5.Sum([]byte(data))
+	return fmt.Sprintf("%x", hash)
 }
 
 // Close đóng kết nối database
