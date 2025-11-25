@@ -31,7 +31,7 @@ func parseProxyString(proxyStr string) (ProxyStringInfo, error) {
 	return info, nil
 }
 
-func CheckProxy(ctx context.Context, proxyStr string) (CheckProxyResponse, error) {
+func (pm *ProxyManager) CheckProxy(proxyStr string) (CheckProxyResponse, error) {
 	info, err := parseProxyString(proxyStr)
 	if err != nil {
 		return CheckProxyResponse{}, err
@@ -48,7 +48,7 @@ func CheckProxy(ctx context.Context, proxyStr string) (CheckProxyResponse, error
 		Timeout:   30 * time.Second,
 	}
 
-	req, _ := http.NewRequestWithContext(ctx, "GET", "https://ip.zmmo.net/ip", nil)
+	req, _ := http.NewRequestWithContext(pm.ctx, "GET", "https://ip.zmmo.net/ip", nil)
 	resp, err := client.Do(req)
 	if err != nil {
 		return CheckProxyResponse{}, err
@@ -108,24 +108,4 @@ func (pm *ProxyManager) callChangeURL(ctx context.Context, changeURL string) err
 	}
 
 	return nil
-}
-
-func (pm *ProxyManager) waitForIPChange(ctx context.Context, proxyStr, initialIP string, timeout time.Duration) (string, error) {
-	ticker := time.NewTicker(5 * time.Second)
-	timer := time.NewTimer(timeout)
-	defer ticker.Stop()
-	defer timer.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return "", fmt.Errorf("canceled")
-		case <-timer.C:
-			return "", fmt.Errorf("timeout")
-		case <-ticker.C:
-			if resp, err := CheckProxy(ctx, proxyStr); err == nil && resp.Query != initialIP && resp.Query != "" {
-				return resp.Query, nil
-			}
-		}
-	}
 }
