@@ -1,13 +1,14 @@
 package goproxy
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
 )
 
 func TestProxyManager(t *testing.T) {
-	pm, err := GetInstance()
+	pm, err := GetInstance(context.Background())
 	if err != nil {
 		t.Fatalf("failed to get proxy manager: %v", err)
 	}

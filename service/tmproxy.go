@@ -63,7 +63,7 @@ type GetNewProxyRequest struct {
 }
 
 // GetNewProxy lấy proxy mới từ TMProxy
-func (t *TMProxy) GetNewProxy(apiKey string, idLocation, idISP int) (*TMProxyData, error) {
+func (t *TMProxy) GetNewProxy(apiKey string, idLocation, idISP int) (*TMProxyResponse, error) {
 	payload := GetNewProxyRequest{
 		APIKey:     apiKey,
 		IDLocation: idLocation,
@@ -99,11 +99,7 @@ func (t *TMProxy) GetNewProxy(apiKey string, idLocation, idISP int) (*TMProxyDat
 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
 	}
 
-	if result.Code != 0 {
-		return nil, fmt.Errorf("tmproxy api error: %s", result.Message)
-	}
-
-	return &result.Data, nil
+	return &result, nil
 }
 
 // GetCurrentProxyRequest payload cho get-current-proxy
@@ -112,7 +108,7 @@ type GetCurrentProxyRequest struct {
 }
 
 // GetCurrentProxy lấy proxy hiện tại từ TMProxy
-func (t *TMProxy) GetCurrentProxy(apiKey string) (*TMProxyData, error) {
+func (t *TMProxy) GetCurrentProxy(apiKey string) (*TMProxyResponse, error) {
 	payload := GetCurrentProxyRequest{
 		APIKey: apiKey,
 	}
@@ -146,9 +142,5 @@ func (t *TMProxy) GetCurrentProxy(apiKey string) (*TMProxyData, error) {
 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
 	}
 
-	if result.Code != 0 {
-		return nil, fmt.Errorf("tmproxy api error: %s", result.Message)
-	}
-
-	return &result.Data, nil
+	return &result, nil
 }
