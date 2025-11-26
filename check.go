@@ -31,7 +31,7 @@ func parseProxyString(proxyStr string) (ProxyStringInfo, error) {
 	return info, nil
 }
 
-func (pm *ProxyManager) CheckProxy(proxyStr string) (CheckProxyResponse, error) {
+func CheckProxy(ctx context.Context, proxyStr string) (CheckProxyResponse, error) {
 	info, err := parseProxyString(proxyStr)
 	if err != nil {
 		return CheckProxyResponse{}, err
@@ -48,7 +48,7 @@ func (pm *ProxyManager) CheckProxy(proxyStr string) (CheckProxyResponse, error) 
 		Timeout:   30 * time.Second,
 	}
 
-	req, _ := http.NewRequestWithContext(pm.ctx, "GET", "https://ip.zmmo.net/ip", nil)
+	req, _ := http.NewRequestWithContext(ctx, "GET", "https://ip.zmmo.net/ip", nil)
 	resp, err := client.Do(req)
 	if err != nil {
 		return CheckProxyResponse{}, err
