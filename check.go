@@ -56,9 +56,14 @@ func CheckProxy(ctx context.Context, proxyStr string) (CheckProxyResponse, error
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
-	var result CheckProxyResponse
-	json.Unmarshal(body, &result)
-	return result, nil
+	response := CheckProxyResponse{}
+	if err := json.Unmarshal(body, &response); err != nil {
+		return CheckProxyResponse{}, err
+	}
+	if response.Status != "success" {
+		return CheckProxyResponse{}, fmt.Errorf("proxy is not live")
+	}
+	return response, nil
 }
 
 func CheckValidIp(ctx context.Context, ip string, count int) (bool, error) {
