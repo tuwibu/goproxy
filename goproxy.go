@@ -1,7 +1,6 @@
 package goproxy
 
 import (
-	"context"
 	"database/sql"
 	"fmt"
 	"sync"
@@ -36,7 +35,6 @@ type Proxy struct {
 
 // ProxyManager quản lý danh sách proxy (Singleton)
 type ProxyManager struct {
-	ctx                 context.Context
 	db                  *sql.DB
 	mu                  sync.RWMutex
 	changeProxyWaitTime time.Duration
@@ -51,23 +49,22 @@ var (
 )
 
 // GetInstance trả về singleton instance của ProxyManager
-func GetInstance(ctx context.Context) (*ProxyManager, error) {
+func GetInstance() (*ProxyManager, error) {
 	var err error
 	once.Do(func() {
-		instance, err = newProxyManager(ctx)
+		instance, err = newProxyManager()
 	})
 	return instance, err
 }
 
 // newProxyManager khởi tạo ProxyManager mới
-func newProxyManager(ctx context.Context) (*ProxyManager, error) {
+func newProxyManager() (*ProxyManager, error) {
 	db, err := initDB("proxy.db")
 	if err != nil {
 		return nil, err
 	}
 
 	pm := &ProxyManager{
-		ctx:        ctx,
 		db:         db,
 		proxyCache: make(map[int64]*Proxy),
 	}
