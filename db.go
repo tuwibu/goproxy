@@ -37,7 +37,7 @@ func (pm *ProxyManager) initSchema() error {
 		change_url TEXT,
 		running BOOLEAN DEFAULT false,
 		used INTEGER DEFAULT 0,
-		last_changed DATETIME,
+		last_changed INTEGER,
 		last_ip TEXT,
 		error TEXT,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -158,7 +158,7 @@ func (pm *ProxyManager) LoadProxiesFromList(proxyStrings []string) ([]int64, err
 		}
 
 		// Luôn luôn set last_changed = now() khi load
-		pm.db.Exec(`UPDATE proxies SET last_changed=? WHERE id=?`, time.Now(), id)
+		pm.db.Exec(`UPDATE proxies SET last_changed=? WHERE id=?`, time.Now().Unix(), id)
 
 		ids = append(ids, id)
 	}
@@ -177,7 +177,7 @@ func (pm *ProxyManager) upsertProxy(pType ProxyType, proxyStr, apiKey, changeUrl
 
 	if err == nil {
 		id, _ := result.LastInsertId()
-		pm.db.Exec(`UPDATE proxies SET last_changed=? WHERE id=?`, now, id)
+		pm.db.Exec(`UPDATE proxies SET last_changed=? WHERE id=?`, now.Unix(), id)
 		pm.proxyCache[id] = &Proxy{
 			ID:          id,
 			Type:        pType,
@@ -218,22 +218,23 @@ func (pm *ProxyManager) upsertProxy(pType ProxyType, proxyStr, apiKey, changeUrl
 func (pm *ProxyManager) GetAvailableProxy() (id int64, proxyStr string, err error) {
 	pm.mu.RLock()
 	now := time.Now()
+	nowUnix := now.Unix()
 
 	// Điều kiện: running=false và (used < max_used hoặc last_changed + min_time < now)
 	// Nếu min_time = 0, nghĩa là luôn đủ điều kiện change IP
 	rows, err := pm.db.Query(`
 		SELECT id, type, proxy_str, api_key, change_url, min_time, running, used, last_ip, last_changed, error, created_at, updated_at
-		FROM proxies 
-		WHERE running=false 
+		FROM proxies
+		WHERE running=false
 		AND (error IS NULL OR error='')
 		AND (
-			used < ? 
-			OR 
-			(min_time = 0 OR (last_changed IS NULL OR (julianday(?) - julianday(last_changed)) * 86400 >= min_time))
+			used < ?
+			OR
+			(min_time = 0 OR (last_changed IS NULL OR (? - last_changed >= min_time)))
 		)
 		ORDER BY RANDOM()
 		LIMIT 1
-	`, pm.maxUsed, now)
+	`, pm.maxUsed, nowUnix)
 
 	if err != nil {
 		pm.mu.RUnlock()
@@ -248,11 +249,11 @@ func (pm *ProxyManager) GetAvailableProxy() (id int64, proxyStr string, err erro
 
 	var p Proxy
 	var lastIP sql.NullString
-	var lastChanged sql.NullTime
+	var lastChangedUnix sql.NullInt64
 	var errStr sql.NullString
 	var apiKey sql.NullString
 	var changeUrl sql.NullString
-	err = rows.Scan(&p.ID, &p.Type, &p.ProxyStr, &apiKey, &changeUrl, &p.MinTime, &p.Running, &p.Used, &lastIP, &lastChanged, &errStr, &p.CreatedAt, &p.UpdatedAt)
+	err = rows.Scan(&p.ID, &p.Type, &p.ProxyStr, &apiKey, &changeUrl, &p.MinTime, &p.Running, &p.Used, &lastIP, &lastChangedUnix, &errStr, &p.CreatedAt, &p.UpdatedAt)
 	rows.Close()
 	pm.mu.RUnlock()
 
@@ -269,8 +270,8 @@ func (pm *ProxyManager) GetAvailableProxy() (id int64, proxyStr string, err erro
 	if lastIP.Valid {
 		p.LastIP = lastIP.String
 	}
-	if lastChanged.Valid {
-		p.LastChanged = lastChanged.Time
+	if lastChangedUnix.Valid {
+		p.LastChanged = time.Unix(lastChangedUnix.Int64, 0)
 	}
 	if errStr.Valid {
 		p.Error = errStr.String
@@ -329,7 +330,7 @@ func (pm *ProxyManager) GetAvailableProxy() (id int64, proxyStr string, err erro
 		newProxyStr := fmt.Sprintf("%s:%s:%s", resp.Data.HTTPS, resp.Data.Username, resp.Data.Password)
 
 		pm.mu.Lock()
-		pm.db.Exec(`UPDATE proxies SET proxy_str=?, last_changed=?, error='', updated_at=? WHERE id=?`, newProxyStr, now, now, p.ID)
+		pm.db.Exec(`UPDATE proxies SET proxy_str=?, last_changed=?, error='', updated_at=? WHERE id=?`, newProxyStr, now.Unix(), now, p.ID)
 		if cached, ok := pm.proxyCache[p.ID]; ok {
 			cached.ProxyStr = newProxyStr
 			cached.LastChanged = now
@@ -370,7 +371,7 @@ func (pm *ProxyManager) GetAvailableProxy() (id int64, proxyStr string, err erro
 
 		// callChangeURL thành công - update last_changed, giữ running=true và used (đã được tăng từ acquire), clear error
 		pm.mu.Lock()
-		pm.db.Exec(`UPDATE proxies SET last_changed=?, error='', updated_at=? WHERE id=?`, now, now, p.ID)
+		pm.db.Exec(`UPDATE proxies SET last_changed=?, error='', updated_at=? WHERE id=?`, now.Unix(), now, p.ID)
 		if cached, ok := pm.proxyCache[p.ID]; ok {
 			cached.LastChanged = now
 			cached.Error = ""
