@@ -326,14 +326,15 @@ func (pm *ProxyManager) GetAvailableProxy() (id int64, proxyStr string, err erro
 			return 0, "", fmt.Errorf("%s", errMsg)
 		}
 
-		// GetNewProxy thành công - update proxy mới, giữ running=true và used (đã được tăng từ acquire), clear error
+		// GetNewProxy thành công - update proxy mới, reset used=1, giữ running=true, clear error
 		newProxyStr := fmt.Sprintf("%s:%s:%s", resp.Data.HTTPS, resp.Data.Username, resp.Data.Password)
 
 		pm.mu.Lock()
-		pm.db.Exec(`UPDATE proxies SET proxy_str=?, last_changed=?, error='', updated_at=? WHERE id=?`, newProxyStr, now.Unix(), now, p.ID)
+		pm.db.Exec(`UPDATE proxies SET proxy_str=?, last_changed=?, used=1, error='', updated_at=? WHERE id=?`, newProxyStr, now.Unix(), now, p.ID)
 		if cached, ok := pm.proxyCache[p.ID]; ok {
 			cached.ProxyStr = newProxyStr
 			cached.LastChanged = now
+			cached.Used = 1
 			cached.Error = ""
 			cached.UpdatedAt = now
 		}
@@ -369,11 +370,12 @@ func (pm *ProxyManager) GetAvailableProxy() (id int64, proxyStr string, err erro
 			return 0, "", fmt.Errorf("%s", errMsg)
 		}
 
-		// callChangeURL thành công - update last_changed, giữ running=true và used (đã được tăng từ acquire), clear error
+		// callChangeURL thành công - update last_changed, reset used=1, giữ running=true, clear error
 		pm.mu.Lock()
-		pm.db.Exec(`UPDATE proxies SET last_changed=?, error='', updated_at=? WHERE id=?`, now.Unix(), now, p.ID)
+		pm.db.Exec(`UPDATE proxies SET last_changed=?, used=1, error='', updated_at=? WHERE id=?`, now.Unix(), now, p.ID)
 		if cached, ok := pm.proxyCache[p.ID]; ok {
 			cached.LastChanged = now
+			cached.Used = 1
 			cached.Error = ""
 			cached.UpdatedAt = now
 		}
