@@ -203,7 +203,7 @@ func (pm *ProxyManager) upsertProxy(pType ProxyType, proxyStr, apiKey, changeUrl
 
 	var id int64
 	pm.db.QueryRow(`SELECT id FROM proxies WHERE unique_key=?`, uniqueKey).Scan(&id)
-	
+
 	// Update cache để đồng bộ với DB
 	if cached, ok := pm.proxyCache[id]; ok {
 		cached.ProxyStr = proxyStr
@@ -211,14 +211,14 @@ func (pm *ProxyManager) upsertProxy(pType ProxyType, proxyStr, apiKey, changeUrl
 		cached.ChangeUrl = changeUrl
 		cached.UpdatedAt = now
 	}
-	
+
 	return id, nil
 }
 
 func (pm *ProxyManager) GetAvailableProxy() (id int64, proxyStr string, err error) {
 	pm.mu.RLock()
 	now := time.Now()
-	
+
 	// Điều kiện: running=false và (used < max_used hoặc last_changed + min_time < now)
 	// Nếu min_time = 0, nghĩa là luôn đủ điều kiện change IP
 	rows, err := pm.db.Query(`
@@ -300,30 +300,35 @@ func (pm *ProxyManager) GetAvailableProxy() (id int64, proxyStr string, err erro
 		if err != nil {
 			// GetNewProxy thất bại - đánh dấu error, release proxy và trả về
 			errMsg := fmt.Sprintf("GetNewProxy failed: %v", err)
+			pm.mu.Lock()
 			pm.db.Exec(`UPDATE proxies SET running=false, error=?, updated_at=? WHERE id=?`, errMsg, now, p.ID)
 			if cached, ok := pm.proxyCache[p.ID]; ok {
 				cached.Running = false
 				cached.Error = errMsg
 				cached.UpdatedAt = now
 			}
+			pm.mu.Unlock()
 			return 0, "", fmt.Errorf("%s", errMsg)
 		}
 
 		if resp.Code != 0 {
 			// API trả về error code - đánh dấu error, release proxy và trả về
 			errMsg := fmt.Sprintf("tmproxy api returned code: %d, message: %s", resp.Code, resp.Message)
+			pm.mu.Lock()
 			pm.db.Exec(`UPDATE proxies SET running=false, error=?, updated_at=? WHERE id=?`, errMsg, now, p.ID)
 			if cached, ok := pm.proxyCache[p.ID]; ok {
 				cached.Running = false
 				cached.Error = errMsg
 				cached.UpdatedAt = now
 			}
+			pm.mu.Unlock()
 			return 0, "", fmt.Errorf("%s", errMsg)
 		}
 
-		// GetNewProxy thành công - update proxy mới, giữ running=true và used=1 (vì đang được sử dụng), clear error
+		// GetNewProxy thành công - update proxy mới, giữ running=true và used (đã được tăng từ acquire), clear error
 		newProxyStr := fmt.Sprintf("%s:%s:%s", resp.Data.HTTPS, resp.Data.Username, resp.Data.Password)
 
+		pm.mu.Lock()
 		pm.db.Exec(`UPDATE proxies SET proxy_str=?, last_changed=?, error='', updated_at=? WHERE id=?`, newProxyStr, now, now, p.ID)
 		if cached, ok := pm.proxyCache[p.ID]; ok {
 			cached.ProxyStr = newProxyStr
@@ -331,6 +336,7 @@ func (pm *ProxyManager) GetAvailableProxy() (id int64, proxyStr string, err erro
 			cached.Error = ""
 			cached.UpdatedAt = now
 		}
+		pm.mu.Unlock()
 
 		p.ProxyStr = newProxyStr
 		p.LastChanged = now
@@ -351,22 +357,26 @@ func (pm *ProxyManager) GetAvailableProxy() (id int64, proxyStr string, err erro
 		if err := pm.callChangeURL(context.Background(), p.ChangeUrl); err != nil {
 			// callChangeURL thất bại - đánh dấu error, release proxy và trả về
 			errMsg := fmt.Sprintf("callChangeURL failed: %v", err)
+			pm.mu.Lock()
 			pm.db.Exec(`UPDATE proxies SET running=false, error=?, updated_at=? WHERE id=?`, errMsg, now, p.ID)
 			if cached, ok := pm.proxyCache[p.ID]; ok {
 				cached.Running = false
 				cached.Error = errMsg
 				cached.UpdatedAt = now
 			}
+			pm.mu.Unlock()
 			return 0, "", fmt.Errorf("%s", errMsg)
 		}
 
-		// callChangeURL thành công - update last_changed, giữ running=true và used=1 (vì đang được sử dụng), clear error
+		// callChangeURL thành công - update last_changed, giữ running=true và used (đã được tăng từ acquire), clear error
+		pm.mu.Lock()
 		pm.db.Exec(`UPDATE proxies SET last_changed=?, error='', updated_at=? WHERE id=?`, now, now, p.ID)
 		if cached, ok := pm.proxyCache[p.ID]; ok {
 			cached.LastChanged = now
 			cached.Error = ""
 			cached.UpdatedAt = now
 		}
+		pm.mu.Unlock()
 
 		p.LastChanged = now
 		p.Error = ""
