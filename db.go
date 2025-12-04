@@ -357,9 +357,9 @@ func (pm *ProxyManager) GetAvailableProxy() (id int64, proxyStr string, err erro
 			// callChangeURL thất bại - đánh dấu error, giữ running=true
 			errMsg := fmt.Sprintf("callChangeURL failed: %v", err)
 			pm.mu.Lock()
-			pm.db.Exec(`UPDATE proxies SET error=?, updated_at=? WHERE id=?`, errMsg, now, p.ID)
+			pm.db.Exec(`UPDATE proxies SET running=false, updated_at=? WHERE id=?`, now, p.ID)
 			if cached, ok := pm.proxyCache[p.ID]; ok {
-				cached.Error = errMsg
+				cached.Running = false
 				cached.UpdatedAt = now
 			}
 			pm.mu.Unlock()

@@ -99,7 +99,7 @@ func (pm *ProxyManager) callChangeURL(ctx context.Context, changeURL string) err
 	}
 
 	client := &http.Client{
-		Timeout: 10 * time.Second,
+		Timeout: 60 * time.Second,
 	}
 
 	resp, err := client.Do(req)
