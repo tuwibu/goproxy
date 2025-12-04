@@ -3,7 +3,9 @@ package goproxy
 import (
 	"context"
 	"crypto/md5"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"strconv"
 	"strings"
@@ -56,6 +58,34 @@ func (pm *ProxyManager) Close() error {
 		return pm.db.Close()
 	}
 	return nil
+}
+
+// generateRandomString tạo chuỗi ngẫu nhiên với độ dài cho trước
+func generateRandomString(length int) string {
+	bytes := make([]byte, length/2)
+	if _, err := rand.Read(bytes); err != nil {
+		// Fallback nếu crypto/rand lỗi
+		return hex.EncodeToString([]byte(fmt.Sprintf("%d", time.Now().UnixNano())))[:length]
+	}
+	return hex.EncodeToString(bytes)[:length]
+}
+
+// processStickyProxyStr xử lý proxy string cho sticky type, thay thế ${random} bằng chuỗi ngẫu nhiên
+func processStickyProxyStr(proxyStr string) string {
+	// Format: ip:port:username:password
+	// Username có thể chứa ${random} cần thay thế
+	parts := strings.Split(proxyStr, ":")
+	if len(parts) >= 3 {
+		username := parts[2]
+		// Thay thế ${random} bằng chuỗi ngẫu nhiên 8 ký tự
+		if strings.Contains(username, "${random}") {
+			randomStr := generateRandomString(8)
+			username = strings.ReplaceAll(username, "${random}", randomStr)
+			parts[2] = username
+			return strings.Join(parts, ":")
+		}
+	}
+	return proxyStr
 }
 
 func (pm *ProxyManager) ReleaseProxy(id int64) error {
@@ -144,12 +174,53 @@ func (pm *ProxyManager) LoadProxiesFromList(proxyStrings []string) ([]int64, err
 			}
 		}
 
-		// Tính uniqueKey: MD5 hash của apiKey (tmproxy) hoặc proxyStr (static/mobilehop)
+		// KiotProxy: lấy proxy từ API
+		if pType == ProxyTypeKiotProxy && apiKey != "" {
+			// Parse region từ parts nếu có (có thể ở vị trí 3 hoặc 4)
+			// Lưu region vào changeUrl để dùng sau này
+			if len(parts) > 3 && parts[3] != "" && !strings.Contains(parts[3], "://") {
+				// Kiểm tra xem có phải là số không (minTime)
+				if val, _ := strconv.Atoi(parts[3]); val == 0 {
+					changeUrl = parts[3] // region
+				} else if len(parts) > 4 {
+					changeUrl = parts[4] // region
+				}
+			}
+
+			region := changeUrl
+			resp, err := service.GetKiotProxy().GetCurrentProxy(apiKey)
+
+			// Nếu GetCurrentProxy lỗi hoặc resp nil hoặc không success, thử GetNewProxy
+			if err != nil || resp == nil || !resp.Success {
+				if newResp, err := service.GetKiotProxy().GetNewProxy(apiKey, region); err == nil && newResp != nil && newResp.Success {
+					resp = newResp
+				} else {
+					continue
+				}
+			}
+
+			// Chỉ lấy proxyStr nếu resp hợp lệ và Success == true
+			if resp != nil && resp.Success {
+				// Format: host:port:: (không có username/password)
+				proxyStr = fmt.Sprintf("%s::", resp.Data.HTTP)
+			}
+		}
+
+		// Sticky: lưu proxyStr gốc (có ${random}), sẽ xử lý khi GetAvailableProxy
+
+		// Tính uniqueKey: MD5 hash của apiKey (tmproxy/kiotproxy) hoặc proxyStr (static/mobilehop/sticky)
 		var uniqueKey string
-		if pType == ProxyTypeTMProxy {
+		if pType == ProxyTypeTMProxy || pType == ProxyTypeKiotProxy {
 			uniqueKey = fmt.Sprintf("%x", md5.Sum([]byte(apiKey)))
 		} else {
-			uniqueKey = fmt.Sprintf("%x", md5.Sum([]byte(proxyStr)))
+			// Với sticky, dùng proxyStr gốc (chưa thay ${random}) để tính uniqueKey
+			if pType == ProxyTypeSticky {
+				// Lấy proxyStr gốc từ parts[1]
+				originalProxyStr := parts[1]
+				uniqueKey = fmt.Sprintf("%x", md5.Sum([]byte(originalProxyStr)))
+			} else {
+				uniqueKey = fmt.Sprintf("%x", md5.Sum([]byte(proxyStr)))
+			}
 		}
 
 		id, err := pm.upsertProxy(pType, proxyStr, apiKey, changeUrl, minTime, uniqueKey)
@@ -220,19 +291,31 @@ func (pm *ProxyManager) GetAvailableProxy() (id int64, proxyStr string, err erro
 	now := time.Now()
 	nowUnix := now.Unix()
 
-	// Điều kiện: running=false và (used < max_used hoặc last_changed + min_time < now)
-	// Nếu min_time = 0, nghĩa là luôn đủ điều kiện change IP
+	// Điều kiện:
+	// - Với sticky: không kiểm tra running/used, chỉ cần error rỗng
+	// - Với các loại khác: running=false và (used < max_used hoặc last_changed + min_time < now)
 	rows, err := pm.db.Query(`
 		SELECT id, type, proxy_str, api_key, change_url, min_time, running, used, last_ip, last_changed, error, created_at, updated_at
 		FROM proxies
-		WHERE running=false
-		AND (error IS NULL OR error='')
+		WHERE (error IS NULL OR error='')
 		AND (
-			used < ?
+			-- Sticky: chỉ cần không có error
+			(type = 'sticky')
 			OR
-			(min_time = 0 OR (last_changed IS NULL OR (? - last_changed >= min_time)))
+			-- Các loại khác: phải running=false và đủ điều kiện
+			(
+				running=false
+				AND (
+					used < ?
+					OR
+					(min_time = 0 OR (last_changed IS NULL OR (? - last_changed >= min_time)))
+				)
+			)
 		)
-		ORDER BY used ASC
+		ORDER BY 
+			CASE WHEN type = 'sticky' THEN 0 ELSE 1 END,
+			used ASC,
+			id ASC
 		LIMIT 1
 	`, pm.maxUsed, nowUnix)
 
@@ -275,6 +358,13 @@ func (pm *ProxyManager) GetAvailableProxy() (id int64, proxyStr string, err erro
 	}
 	if errStr.Valid {
 		p.Error = errStr.String
+	}
+
+	// Sticky: không cần set running/used, chỉ cần xử lý proxyStr và trả về
+	if p.Type == ProxyTypeSticky {
+		// Xử lý proxyStr để thay thế ${random}
+		processedProxyStr := processStickyProxyStr(p.ProxyStr)
+		return p.ID, processedProxyStr, nil
 	}
 
 	// Acquire proxy: set running=true trước (chưa tăng used)
@@ -377,6 +467,69 @@ func (pm *ProxyManager) GetAvailableProxy() (id int64, proxyStr string, err erro
 		}
 		pm.mu.Unlock()
 
+		p.LastChanged = now
+		p.Error = ""
+		p.UpdatedAt = now
+
+		// Đợi ChangeProxyWaitTime trước khi trả result
+		if pm.changeProxyWaitTime > 0 {
+			time.Sleep(pm.changeProxyWaitTime)
+		}
+
+		return p.ID, p.ProxyStr, nil
+	}
+
+	// KiotProxy: restart nếu đủ điều kiện
+	if p.Type == ProxyTypeKiotProxy && canChangeIP && p.ApiKey != "" {
+		// Parse region từ changeUrl nếu có
+		region := ""
+		if p.ChangeUrl != "" {
+			region = p.ChangeUrl
+		}
+
+		// KiotProxy: gọi GetNewProxy
+		resp, err := service.GetKiotProxy().GetNewProxy(p.ApiKey, region)
+		if err != nil {
+			// GetNewProxy thất bại - đánh dấu error, giữ running=true
+			errMsg := fmt.Sprintf("GetNewProxy failed: %v", err)
+			pm.mu.Lock()
+			pm.db.Exec(`UPDATE proxies SET error=?, updated_at=? WHERE id=?`, errMsg, now, p.ID)
+			if cached, ok := pm.proxyCache[p.ID]; ok {
+				cached.Error = errMsg
+				cached.UpdatedAt = now
+			}
+			pm.mu.Unlock()
+			return 0, "", fmt.Errorf("%s", errMsg)
+		}
+
+		if !resp.Success {
+			// API trả về error - đánh dấu error, giữ running=true
+			errMsg := fmt.Sprintf("kiotproxy api returned code: %d, message: %s, error: %s", resp.Code, resp.Message, resp.Error)
+			pm.mu.Lock()
+			pm.db.Exec(`UPDATE proxies SET error=?, updated_at=? WHERE id=?`, errMsg, now, p.ID)
+			if cached, ok := pm.proxyCache[p.ID]; ok {
+				cached.Error = errMsg
+				cached.UpdatedAt = now
+			}
+			pm.mu.Unlock()
+			return 0, "", fmt.Errorf("%s", errMsg)
+		}
+
+		// GetNewProxy thành công - update proxy mới, reset used=1, giữ running=true, clear error
+		newProxyStr := fmt.Sprintf("%s::", resp.Data.HTTP)
+
+		pm.mu.Lock()
+		pm.db.Exec(`UPDATE proxies SET proxy_str=?, last_changed=?, used=1, error='', updated_at=? WHERE id=?`, newProxyStr, now.Unix(), now, p.ID)
+		if cached, ok := pm.proxyCache[p.ID]; ok {
+			cached.ProxyStr = newProxyStr
+			cached.LastChanged = now
+			cached.Used = 1
+			cached.Error = ""
+			cached.UpdatedAt = now
+		}
+		pm.mu.Unlock()
+
+		p.ProxyStr = newProxyStr
 		p.LastChanged = now
 		p.Error = ""
 		p.UpdatedAt = now

@@ -14,6 +14,8 @@ const (
 	ProxyTypeTMProxy   ProxyType = "tmproxy"
 	ProxyTypeStatic    ProxyType = "static"
 	ProxyTypeMobileHop ProxyType = "mobilehop"
+	ProxyTypeSticky    ProxyType = "sticky"
+	ProxyTypeKiotProxy ProxyType = "kiotproxy"
 )
 
 // Proxy đại diện cho một proxy entry
@@ -80,7 +82,7 @@ func newProxyManager() (*ProxyManager, error) {
 
 func (pm *ProxyManager) validateProxyType(t ProxyType) error {
 	switch t {
-	case ProxyTypeTMProxy, ProxyTypeStatic, ProxyTypeMobileHop:
+	case ProxyTypeTMProxy, ProxyTypeStatic, ProxyTypeMobileHop, ProxyTypeSticky, ProxyTypeKiotProxy:
 		return nil
 	}
 	return fmt.Errorf("invalid type: %s", t)
