@@ -37,9 +37,9 @@ func (pm *ProxyManager) initSchema() error {
 		unique_key TEXT UNIQUE,
 		min_time INTEGER,
 		change_url TEXT,
-		running BOOLEAN DEFAULT false,
+		running INTEGER DEFAULT 0,
 		used INTEGER DEFAULT 0,
-		unique BOOLEAN DEFAULT false,
+		unique INTEGER DEFAULT 0,
 		last_changed INTEGER,
 		last_ip TEXT,
 		error TEXT,
@@ -54,10 +54,10 @@ func (pm *ProxyManager) initSchema() error {
 	}
 
 	// Migration: Thêm cột unique nếu chưa tồn tại
-	pm.db.Exec(`ALTER TABLE proxies ADD COLUMN unique BOOLEAN DEFAULT false`)
+	pm.db.Exec(`ALTER TABLE proxies ADD COLUMN unique INTEGER DEFAULT 0`)
 
-	// Migration: Cập nhật unique=true cho các proxy type cũ
-	pm.db.Exec(`UPDATE proxies SET unique=true WHERE type IN ('tmproxy', 'mobilehop', 'static', 'kiotproxy')`)
+	// Migration: Cập nhật unique=1 cho các proxy type cũ
+	pm.db.Exec(`UPDATE proxies SET unique=1 WHERE type IN ('tmproxy', 'mobilehop', 'static', 'kiotproxy')`)
 
 	return nil
 }
