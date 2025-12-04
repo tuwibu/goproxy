@@ -39,7 +39,7 @@ func (pm *ProxyManager) initSchema() error {
 		change_url TEXT,
 		running INTEGER DEFAULT 0,
 		used INTEGER DEFAULT 0,
-		unique INTEGER DEFAULT 0,
+		is_unique INTEGER DEFAULT 0,
 		last_changed INTEGER,
 		last_ip TEXT,
 		error TEXT,
@@ -53,11 +53,11 @@ func (pm *ProxyManager) initSchema() error {
 		return err
 	}
 
-	// Migration: Thêm cột unique nếu chưa tồn tại
-	pm.db.Exec(`ALTER TABLE proxies ADD COLUMN unique INTEGER DEFAULT 0`)
+	// Migration: Thêm cột is_unique nếu chưa tồn tại
+	pm.db.Exec(`ALTER TABLE proxies ADD COLUMN is_unique INTEGER DEFAULT 0`)
 
-	// Migration: Cập nhật unique=1 cho các proxy type cũ
-	pm.db.Exec(`UPDATE proxies SET unique=1 WHERE type IN ('tmproxy', 'mobilehop', 'static', 'kiotproxy')`)
+	// Migration: Cập nhật is_unique=1 cho các proxy type cũ
+	pm.db.Exec(`UPDATE proxies SET is_unique=1 WHERE type IN ('tmproxy', 'mobilehop', 'static', 'kiotproxy')`)
 
 	return nil
 }
@@ -281,7 +281,7 @@ func (pm *ProxyManager) upsertProxy(pType ProxyType, proxyStr, apiKey, changeUrl
 	now := time.Now()
 
 	result, err := pm.db.Exec(
-		`INSERT INTO proxies (type, proxy_str, api_key, unique_key, min_time, change_url, unique, created_at, updated_at)
+		`INSERT INTO proxies (type, proxy_str, api_key, unique_key, min_time, change_url, is_unique, created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		pType, proxyStr, apiKey, uniqueKey, minTime, changeUrl, unique, now, now,
 	)
@@ -310,7 +310,7 @@ func (pm *ProxyManager) upsertProxy(pType ProxyType, proxyStr, apiKey, changeUrl
 		return 0, err
 	}
 
-	pm.db.Exec(`UPDATE proxies SET proxy_str=?, min_time=?, change_url=?, unique=?, updated_at=? WHERE unique_key=?`,
+	pm.db.Exec(`UPDATE proxies SET proxy_str=?, min_time=?, change_url=?, is_unique=?, updated_at=? WHERE unique_key=?`,
 		proxyStr, minTime, changeUrl, unique, now, uniqueKey)
 
 	var id int64
@@ -334,20 +334,20 @@ func (pm *ProxyManager) GetAvailableProxy() (id int64, proxyStr string, err erro
 	nowUnix := now.Unix()
 
 	// Điều kiện:
-	// - Với unique=false (sticky có thể không unique): không kiểm tra running/used, chỉ cần error rỗng
-	// - Với unique=true: running=false và (used < max_used hoặc last_changed + min_time < now)
+	// - Với is_unique=0 (sticky có thể không unique): không kiểm tra running/used, chỉ cần error rỗng
+	// - Với is_unique=1: running=0 và (used < max_used hoặc last_changed + min_time < now)
 	rows, err := pm.db.Query(`
-		SELECT id, type, proxy_str, api_key, change_url, min_time, running, used, unique, last_ip, last_changed, error, created_at, updated_at
+		SELECT id, type, proxy_str, api_key, change_url, min_time, running, used, is_unique, last_ip, last_changed, error, created_at, updated_at
 		FROM proxies
 		WHERE (error IS NULL OR error='')
 		AND (
-			-- unique=false: chỉ cần không có error (sticky không unique)
-			(unique = false)
+			-- is_unique=0: chỉ cần không có error (sticky không unique)
+			(is_unique = 0)
 			OR
-			-- unique=true: phải running=false và đủ điều kiện
+			-- is_unique=1: phải running=0 và đủ điều kiện
 			(
-				unique = true
-				AND running=false
+				is_unique = 1
+				AND running=0
 				AND (
 					used < ?
 					OR
@@ -356,7 +356,7 @@ func (pm *ProxyManager) GetAvailableProxy() (id int64, proxyStr string, err erro
 			)
 		)
 		ORDER BY 
-			CASE WHEN unique = false THEN 0 ELSE 1 END,
+			CASE WHEN is_unique = 0 THEN 0 ELSE 1 END,
 			used ASC,
 			id ASC
 		LIMIT 1
