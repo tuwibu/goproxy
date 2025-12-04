@@ -39,6 +39,7 @@ func (pm *ProxyManager) initSchema() error {
 		change_url TEXT,
 		running BOOLEAN DEFAULT false,
 		used INTEGER DEFAULT 0,
+		unique BOOLEAN DEFAULT false,
 		last_changed INTEGER,
 		last_ip TEXT,
 		error TEXT,
@@ -48,7 +49,17 @@ func (pm *ProxyManager) initSchema() error {
 	CREATE INDEX IF NOT EXISTS idx_type ON proxies(type);
 	CREATE INDEX IF NOT EXISTS idx_unique_key ON proxies(unique_key);
 	`)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Migration: Thêm cột unique nếu chưa tồn tại
+	pm.db.Exec(`ALTER TABLE proxies ADD COLUMN unique BOOLEAN DEFAULT false`)
+
+	// Migration: Cập nhật unique=true cho các proxy type cũ
+	pm.db.Exec(`UPDATE proxies SET unique=true WHERE type IN ('tmproxy', 'mobilehop', 'static', 'kiotproxy')`)
+
+	return nil
 }
 
 func (pm *ProxyManager) Close() error {
@@ -117,6 +128,14 @@ func (pm *ProxyManager) LoadProxiesFromList(proxyStrings []string) ([]int64, err
 		var proxyStr, apiKey string
 		changeUrl := ""
 		minTime := 0
+		unique := false
+
+		// Xác định unique theo loại proxy
+		// tmproxy, mobilehop, static, kiotproxy: unique = true
+		// sticky: có thể truyền true/false, default = false
+		if pType == ProxyTypeTMProxy || pType == ProxyTypeMobileHop || pType == ProxyTypeStatic || pType == ProxyTypeKiotProxy {
+			unique = true
+		}
 
 		if strings.Contains(parts[1], ":") {
 			proxyStr = parts[1]
@@ -125,17 +144,38 @@ func (pm *ProxyManager) LoadProxiesFromList(proxyStrings []string) ([]int64, err
 		}
 
 		if len(parts) > 2 && parts[2] != "" {
-			if val, _ := strconv.Atoi(parts[2]); val > 0 {
-				minTime = val
-				if len(parts) > 3 {
-					changeUrl = parts[3]
-				}
-			} else {
-				changeUrl = parts[2]
-				if len(parts) > 3 {
-					strconv.Atoi(parts[3])
+			// Với sticky: parts[2] có thể là unique flag (true/false)
+			if pType == ProxyTypeSticky && (parts[2] == "true" || parts[2] == "false") {
+				unique = parts[2] == "true"
+				// Check parts[3] và parts[4] cho minTime/changeUrl
+				if len(parts) > 3 && parts[3] != "" {
 					if val, _ := strconv.Atoi(parts[3]); val > 0 {
 						minTime = val
+						if len(parts) > 4 {
+							changeUrl = parts[4]
+						}
+					} else {
+						changeUrl = parts[3]
+						if len(parts) > 4 {
+							if val, _ := strconv.Atoi(parts[4]); val > 0 {
+								minTime = val
+							}
+						}
+					}
+				}
+			} else {
+				// Không phải sticky unique flag: xử lý minTime/changeUrl như cũ
+				if val, _ := strconv.Atoi(parts[2]); val > 0 {
+					minTime = val
+					if len(parts) > 3 {
+						changeUrl = parts[3]
+					}
+				} else {
+					changeUrl = parts[2]
+					if len(parts) > 3 {
+						if val, _ := strconv.Atoi(parts[3]); val > 0 {
+							minTime = val
+						}
 					}
 				}
 			}
@@ -223,7 +263,7 @@ func (pm *ProxyManager) LoadProxiesFromList(proxyStrings []string) ([]int64, err
 			}
 		}
 
-		id, err := pm.upsertProxy(pType, proxyStr, apiKey, changeUrl, minTime, uniqueKey)
+		id, err := pm.upsertProxy(pType, proxyStr, apiKey, changeUrl, minTime, uniqueKey, unique)
 		if err != nil {
 			return nil, err
 		}
@@ -237,13 +277,13 @@ func (pm *ProxyManager) LoadProxiesFromList(proxyStrings []string) ([]int64, err
 	return ids, nil
 }
 
-func (pm *ProxyManager) upsertProxy(pType ProxyType, proxyStr, apiKey, changeUrl string, minTime int, uniqueKey string) (int64, error) {
+func (pm *ProxyManager) upsertProxy(pType ProxyType, proxyStr, apiKey, changeUrl string, minTime int, uniqueKey string, unique bool) (int64, error) {
 	now := time.Now()
 
 	result, err := pm.db.Exec(
-		`INSERT INTO proxies (type, proxy_str, api_key, unique_key, min_time, change_url, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		pType, proxyStr, apiKey, uniqueKey, minTime, changeUrl, now, now,
+		`INSERT INTO proxies (type, proxy_str, api_key, unique_key, min_time, change_url, unique, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		pType, proxyStr, apiKey, uniqueKey, minTime, changeUrl, unique, now, now,
 	)
 
 	if err == nil {
@@ -258,6 +298,7 @@ func (pm *ProxyManager) upsertProxy(pType ProxyType, proxyStr, apiKey, changeUrl
 			MinTime:     minTime,
 			Running:     false,
 			Used:        0,
+			Unique:      unique,
 			LastChanged: now,
 			CreatedAt:   now,
 			UpdatedAt:   now,
@@ -269,8 +310,8 @@ func (pm *ProxyManager) upsertProxy(pType ProxyType, proxyStr, apiKey, changeUrl
 		return 0, err
 	}
 
-	pm.db.Exec(`UPDATE proxies SET proxy_str=?, min_time=?, change_url=?, updated_at=? WHERE unique_key=?`,
-		proxyStr, minTime, changeUrl, now, uniqueKey)
+	pm.db.Exec(`UPDATE proxies SET proxy_str=?, min_time=?, change_url=?, unique=?, updated_at=? WHERE unique_key=?`,
+		proxyStr, minTime, changeUrl, unique, now, uniqueKey)
 
 	var id int64
 	pm.db.QueryRow(`SELECT id FROM proxies WHERE unique_key=?`, uniqueKey).Scan(&id)
@@ -280,6 +321,7 @@ func (pm *ProxyManager) upsertProxy(pType ProxyType, proxyStr, apiKey, changeUrl
 		cached.ProxyStr = proxyStr
 		cached.MinTime = minTime
 		cached.ChangeUrl = changeUrl
+		cached.Unique = unique
 		cached.UpdatedAt = now
 	}
 
@@ -292,19 +334,20 @@ func (pm *ProxyManager) GetAvailableProxy() (id int64, proxyStr string, err erro
 	nowUnix := now.Unix()
 
 	// Điều kiện:
-	// - Với sticky: không kiểm tra running/used, chỉ cần error rỗng
-	// - Với các loại khác: running=false và (used < max_used hoặc last_changed + min_time < now)
+	// - Với unique=false (sticky có thể không unique): không kiểm tra running/used, chỉ cần error rỗng
+	// - Với unique=true: running=false và (used < max_used hoặc last_changed + min_time < now)
 	rows, err := pm.db.Query(`
-		SELECT id, type, proxy_str, api_key, change_url, min_time, running, used, last_ip, last_changed, error, created_at, updated_at
+		SELECT id, type, proxy_str, api_key, change_url, min_time, running, used, unique, last_ip, last_changed, error, created_at, updated_at
 		FROM proxies
 		WHERE (error IS NULL OR error='')
 		AND (
-			-- Sticky: chỉ cần không có error
-			(type = 'sticky')
+			-- unique=false: chỉ cần không có error (sticky không unique)
+			(unique = false)
 			OR
-			-- Các loại khác: phải running=false và đủ điều kiện
+			-- unique=true: phải running=false và đủ điều kiện
 			(
-				running=false
+				unique = true
+				AND running=false
 				AND (
 					used < ?
 					OR
@@ -313,7 +356,7 @@ func (pm *ProxyManager) GetAvailableProxy() (id int64, proxyStr string, err erro
 			)
 		)
 		ORDER BY 
-			CASE WHEN type = 'sticky' THEN 0 ELSE 1 END,
+			CASE WHEN unique = false THEN 0 ELSE 1 END,
 			used ASC,
 			id ASC
 		LIMIT 1
@@ -336,7 +379,7 @@ func (pm *ProxyManager) GetAvailableProxy() (id int64, proxyStr string, err erro
 	var errStr sql.NullString
 	var apiKey sql.NullString
 	var changeUrl sql.NullString
-	err = rows.Scan(&p.ID, &p.Type, &p.ProxyStr, &apiKey, &changeUrl, &p.MinTime, &p.Running, &p.Used, &lastIP, &lastChangedUnix, &errStr, &p.CreatedAt, &p.UpdatedAt)
+	err = rows.Scan(&p.ID, &p.Type, &p.ProxyStr, &apiKey, &changeUrl, &p.MinTime, &p.Running, &p.Used, &p.Unique, &lastIP, &lastChangedUnix, &errStr, &p.CreatedAt, &p.UpdatedAt)
 	rows.Close()
 	pm.mu.RUnlock()
 
@@ -360,11 +403,15 @@ func (pm *ProxyManager) GetAvailableProxy() (id int64, proxyStr string, err erro
 		p.Error = errStr.String
 	}
 
-	// Sticky: không cần set running/used, chỉ cần xử lý proxyStr và trả về
-	if p.Type == ProxyTypeSticky {
-		// Xử lý proxyStr để thay thế ${random}
-		processedProxyStr := processStickyProxyStr(p.ProxyStr)
-		return p.ID, processedProxyStr, nil
+	// Proxy không unique: không cần set running/used, chỉ cần xử lý proxyStr và trả về
+	if !p.Unique {
+		// Sticky: xử lý proxyStr để thay thế ${random}
+		if p.Type == ProxyTypeSticky {
+			processedProxyStr := processStickyProxyStr(p.ProxyStr)
+			return p.ID, processedProxyStr, nil
+		}
+		// Các loại khác: trả về proxyStr thường
+		return p.ID, p.ProxyStr, nil
 	}
 
 	// Acquire proxy: set running=true trước (chưa tăng used)
@@ -382,6 +429,35 @@ func (pm *ProxyManager) GetAvailableProxy() (id int64, proxyStr string, err erro
 	// Kiểm tra điều kiện restart: last_changed + min_time <= time hiện tại
 	timeSinceLastChange := now.Sub(p.LastChanged).Seconds()
 	canChangeIP := p.MinTime == 0 || timeSinceLastChange >= float64(p.MinTime)
+
+	// Sticky với unique=true: thay ${random} = restart (change IP)
+	if p.Type == ProxyTypeSticky && p.Unique {
+		if canChangeIP {
+			// Đủ điều kiện restart: reset used=1, update last_changed
+			pm.mu.Lock()
+			pm.db.Exec(`UPDATE proxies SET last_changed=?, used=1, error='', updated_at=? WHERE id=?`, now.Unix(), now, p.ID)
+			if cached, ok := pm.proxyCache[p.ID]; ok {
+				cached.LastChanged = now
+				cached.Used = 1
+				cached.Error = ""
+				cached.UpdatedAt = now
+			}
+			pm.mu.Unlock()
+		} else {
+			// Không đủ điều kiện restart: tăng used++
+			pm.mu.Lock()
+			pm.db.Exec(`UPDATE proxies SET used=used+1, updated_at=? WHERE id=?`, now, p.ID)
+			if cached, ok := pm.proxyCache[p.ID]; ok {
+				cached.Used = cached.Used + 1
+				cached.UpdatedAt = now
+			}
+			pm.mu.Unlock()
+		}
+
+		// Xử lý proxyStr để thay thế ${random}
+		processedProxyStr := processStickyProxyStr(p.ProxyStr)
+		return p.ID, processedProxyStr, nil
+	}
 
 	// TMProxy: restart nếu đủ điều kiện
 	if p.Type == ProxyTypeTMProxy && canChangeIP && p.ApiKey != "" {
