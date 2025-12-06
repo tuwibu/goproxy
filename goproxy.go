@@ -28,6 +28,7 @@ type Proxy struct {
 	MinTime     int  // thời gian tối thiểu giữa các lần thay đổi (giây)
 	Running     bool // cờ chỉ proxy có đang được sử dụng hay không
 	Used        int  // số lần proxy đã được sử dụng
+	Unique      bool // có check running hay không (tmproxy/mobilehop/static=true, sticky=tùy chỉnh)
 	LastChanged time.Time
 	LastIP      string
 	Error       string // lỗi nếu GetNewProxy thất bại
