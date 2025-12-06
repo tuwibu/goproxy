@@ -67,7 +67,7 @@ func CheckProxy(ctx context.Context, proxyStr string) (CheckProxyResponse, error
 }
 
 func CheckValidIp(ctx context.Context, ip string, count int, blockDays int) (bool, error) {
-	url := fmt.Sprintf("https://ip2.egde.net/api/ip/check2?userId=16f2f8c6-7780-4a16-9763-afc5c082e6d7&ip=%s&count=%d&blockDays=%d", ip, count, blockDays)
+	url := fmt.Sprintf("https://checkip.zmmo.net/api/ip/check2?userId=16f2f8c6-7780-4a16-9763-afc5c082e6d7&ip=%s&count=%d&blockDays=%d", ip, count, blockDays)
 	resp, err := http.Get(url)
 	if err != nil {
 		return false, err
