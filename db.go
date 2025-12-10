@@ -305,7 +305,7 @@ func (pm *ProxyManager) LoadProxiesFromList(proxyStrings []string) ([]int64, err
 					proxyError = fmt.Sprintf("GetNewProxy failed - code: %d, message: %s, error: %s", newResp.Code, newResp.Message, newResp.Error)
 					lastChanged = time.Now()
 				} else {
-					proxyStr = fmt.Sprintf("%s::", newResp.Data.HTTP)
+					proxyStr = newResp.Data.HTTP
 					lastChanged = time.Now()
 				}
 			}
