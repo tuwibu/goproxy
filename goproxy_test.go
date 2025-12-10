@@ -76,7 +76,7 @@ func TestGetAvailableProxy_Static(t *testing.T) {
 	}
 
 	// Lấy proxy lần 1
-	id1, proxy1, err := pm.GetAvailableProxy()
+	id1, proxy1, err := pm.GetAvailableProxy(1)
 	if err != nil {
 		t.Fatalf("GetAvailableProxy failed: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestGetAvailableProxy_Static(t *testing.T) {
 	pm.ReleaseProxy(id1)
 
 	// Lấy proxy lần 2
-	id2, proxy2, err := pm.GetAvailableProxy()
+	id2, proxy2, err := pm.GetAvailableProxy(1)
 	if err != nil {
 		t.Fatalf("GetAvailableProxy failed: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestGetAvailableProxy_Static(t *testing.T) {
 	pm.ReleaseProxy(id2)
 
 	// Lần 3 phải fail vì maxUsed=2
-	_, _, err = pm.GetAvailableProxy()
+	_, _, err = pm.GetAvailableProxy(1)
 	if err == nil {
 		t.Errorf("Expected error when maxUsed exceeded, but got none")
 	} else {
@@ -120,7 +120,7 @@ func TestGetAvailableProxy_StickyNonUnique(t *testing.T) {
 	// Lấy proxy nhiều lần - mỗi lần phải có random khác nhau
 	var proxies []string
 	for i := 0; i < 5; i++ {
-		id, proxy, err := pm.GetAvailableProxy()
+		id, proxy, err := pm.GetAvailableProxy(1)
 		if err != nil {
 			t.Fatalf("GetAvailableProxy failed: %v", err)
 		}
@@ -157,14 +157,14 @@ func TestGetAvailableProxy_StickyUnique(t *testing.T) {
 	}
 
 	// Lấy proxy lần 1
-	id1, proxy1, err := pm.GetAvailableProxy()
+	id1, proxy1, err := pm.GetAvailableProxy(1)
 	if err != nil {
 		t.Fatalf("GetAvailableProxy failed: %v", err)
 	}
 	t.Logf("Sticky unique 1: id=%d, proxy=%s", id1, proxy1)
 
 	// Không release - thử lấy lại phải fail vì running=true
-	_, _, err = pm.GetAvailableProxy()
+	_, _, err = pm.GetAvailableProxy(1)
 	if err == nil {
 		t.Errorf("Expected error when proxy is running, but got none")
 	} else {
@@ -173,7 +173,7 @@ func TestGetAvailableProxy_StickyUnique(t *testing.T) {
 
 	// Release và lấy lại
 	pm.ReleaseProxy(id1)
-	id2, proxy2, err := pm.GetAvailableProxy()
+	id2, proxy2, err := pm.GetAvailableProxy(1)
 	if err != nil {
 		t.Fatalf("GetAvailableProxy failed after release: %v", err)
 	}
@@ -181,7 +181,7 @@ func TestGetAvailableProxy_StickyUnique(t *testing.T) {
 	pm.ReleaseProxy(id2)
 
 	// Lần 3 phải fail vì maxUsed=2
-	_, _, err = pm.GetAvailableProxy()
+	_, _, err = pm.GetAvailableProxy(1)
 	if err == nil {
 		t.Errorf("Expected error when maxUsed exceeded, but got none")
 	} else {
@@ -192,7 +192,7 @@ func TestGetAvailableProxy_StickyUnique(t *testing.T) {
 	t.Logf("Waiting 2s for min_time...")
 	time.Sleep(2 * time.Second)
 
-	id3, proxy3, err := pm.GetAvailableProxy()
+	id3, proxy3, err := pm.GetAvailableProxy(1)
 	if err != nil {
 		t.Fatalf("GetAvailableProxy failed after min_time: %v", err)
 	}
@@ -302,7 +302,7 @@ func TestRealTMProxy(t *testing.T) {
 		t.Fatalf("SetConfig failed: %v", err)
 	}
 
-	id, proxy, err := pm.GetAvailableProxy()
+	id, proxy, err := pm.GetAvailableProxy(1)
 	if err != nil {
 		t.Fatalf("GetAvailableProxy failed: %v", err)
 	}
@@ -334,7 +334,7 @@ func TestRealKiotProxy(t *testing.T) {
 		t.Fatalf("SetConfig failed: %v", err)
 	}
 
-	id, proxy, err := pm.GetAvailableProxy()
+	id, proxy, err := pm.GetAvailableProxy(1)
 	if err != nil {
 		t.Fatalf("GetAvailableProxy failed: %v", err)
 	}
@@ -369,7 +369,7 @@ func TestAllProxyTypes(t *testing.T) {
 
 	// Thử lấy proxy 10 lần
 	for i := 0; i < 10; i++ {
-		id, proxy, err := pm.GetAvailableProxy()
+		id, proxy, err := pm.GetAvailableProxy(1)
 		if err != nil {
 			t.Logf("GetAvailableProxy %d failed: %v", i+1, err)
 			break

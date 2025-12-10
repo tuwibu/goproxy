@@ -59,6 +59,9 @@ func (pm *ProxyManager) initSchema() error {
 	// Migration: Cập nhật is_unique=1 cho các proxy type cũ
 	pm.db.Exec(`UPDATE proxies SET is_unique=1 WHERE type IN ('tmproxy', 'mobilehop', 'static', 'kiotproxy')`)
 
+	// Migration: Thêm cột thread_id nếu chưa tồn tại
+	pm.db.Exec(`ALTER TABLE proxies ADD COLUMN thread_id INTEGER`)
+
 	return nil
 }
 
@@ -105,7 +108,7 @@ func (pm *ProxyManager) ReleaseProxy(id int64) error {
 	defer pm.mu.Unlock()
 
 	now := time.Now()
-	pm.db.Exec(`UPDATE proxies SET running=false, updated_at=? WHERE id=?`, now, id)
+	pm.db.Exec(`UPDATE proxies SET running=false, thread_id=NULL, updated_at=? WHERE id=?`, now, id)
 	if p, ok := pm.proxyCache[id]; ok {
 		p.Running, p.UpdatedAt = false, now
 	}
@@ -394,7 +397,7 @@ func (pm *ProxyManager) upsertProxy(pType ProxyType, proxyStr, apiKey, changeUrl
 	return id, nil
 }
 
-func (pm *ProxyManager) GetAvailableProxy() (id int64, proxyStr string, err error) {
+func (pm *ProxyManager) GetAvailableProxy(threadId int) (id int64, proxyStr string, err error) {
 	pm.mu.RLock()
 	now := time.Now()
 	nowUnix := now.Unix()
@@ -484,9 +487,9 @@ func (pm *ProxyManager) GetAvailableProxy() (id int64, proxyStr string, err erro
 		return p.ID, p.ProxyStr, nil
 	}
 
-	// Acquire proxy: set running=true trước (chưa tăng used)
+	// Acquire proxy: set running=true và thread_id trước (chưa tăng used)
 	pm.mu.Lock()
-	if _, err := pm.db.Exec(`UPDATE proxies SET running=true, updated_at=? WHERE id=?`, now, p.ID); err != nil {
+	if _, err := pm.db.Exec(`UPDATE proxies SET running=true, thread_id=?, updated_at=? WHERE id=?`, threadId, now, p.ID); err != nil {
 		pm.mu.Unlock()
 		return 0, "", fmt.Errorf("failed to acquire proxy: %v", err)
 	}
@@ -534,10 +537,10 @@ func (pm *ProxyManager) GetAvailableProxy() (id int64, proxyStr string, err erro
 		// TMProxy: gọi GetNewProxy
 		resp, err := service.GetTMProxy().GetNewProxy(p.ApiKey, 0, 0)
 		if err != nil {
-			// GetNewProxy thất bại - đánh dấu error, giữ running=true
+			// GetNewProxy thất bại - đánh dấu error, clear thread_id
 			errMsg := fmt.Sprintf("GetNewProxy failed: %v", err)
 			pm.mu.Lock()
-			pm.db.Exec(`UPDATE proxies SET error=?, updated_at=? WHERE id=?`, errMsg, now, p.ID)
+			pm.db.Exec(`UPDATE proxies SET error=?, thread_id=NULL, updated_at=? WHERE id=?`, errMsg, now, p.ID)
 			if cached, ok := pm.proxyCache[p.ID]; ok {
 				cached.Error = errMsg
 				cached.UpdatedAt = now
@@ -547,10 +550,10 @@ func (pm *ProxyManager) GetAvailableProxy() (id int64, proxyStr string, err erro
 		}
 
 		if resp.Code != 0 {
-			// API trả về error code - đánh dấu error, giữ running=true
+			// API trả về error code - đánh dấu error, clear thread_id
 			errMsg := fmt.Sprintf("tmproxy api returned code: %d, message: %s", resp.Code, resp.Message)
 			pm.mu.Lock()
-			pm.db.Exec(`UPDATE proxies SET error=?, updated_at=? WHERE id=?`, errMsg, now, p.ID)
+			pm.db.Exec(`UPDATE proxies SET error=?, thread_id=NULL, updated_at=? WHERE id=?`, errMsg, now, p.ID)
 			if cached, ok := pm.proxyCache[p.ID]; ok {
 				cached.Error = errMsg
 				cached.UpdatedAt = now
@@ -590,10 +593,10 @@ func (pm *ProxyManager) GetAvailableProxy() (id int64, proxyStr string, err erro
 	if p.Type == ProxyTypeMobileHop && p.ChangeUrl != "" {
 		// Gọi callChangeURL
 		if err := pm.callChangeURL(context.Background(), p.ChangeUrl); err != nil {
-			// callChangeURL thất bại - đánh dấu error, giữ running=true
+			// callChangeURL thất bại - set running=false, clear thread_id
 			errMsg := fmt.Sprintf("callChangeURL failed: %v", err)
 			pm.mu.Lock()
-			pm.db.Exec(`UPDATE proxies SET running=false, updated_at=? WHERE id=?`, now, p.ID)
+			pm.db.Exec(`UPDATE proxies SET running=false, thread_id=NULL, updated_at=? WHERE id=?`, now, p.ID)
 			if cached, ok := pm.proxyCache[p.ID]; ok {
 				cached.Running = false
 				cached.UpdatedAt = now
@@ -636,10 +639,10 @@ func (pm *ProxyManager) GetAvailableProxy() (id int64, proxyStr string, err erro
 		// KiotProxy: gọi GetNewProxy
 		resp, err := service.GetKiotProxy().GetNewProxy(p.ApiKey, region)
 		if err != nil {
-			// GetNewProxy thất bại - đánh dấu error, giữ running=true
+			// GetNewProxy thất bại - đánh dấu error, clear thread_id
 			errMsg := fmt.Sprintf("GetNewProxy failed: %v", err)
 			pm.mu.Lock()
-			pm.db.Exec(`UPDATE proxies SET error=?, updated_at=? WHERE id=?`, errMsg, now, p.ID)
+			pm.db.Exec(`UPDATE proxies SET error=?, thread_id=NULL, updated_at=? WHERE id=?`, errMsg, now, p.ID)
 			if cached, ok := pm.proxyCache[p.ID]; ok {
 				cached.Error = errMsg
 				cached.UpdatedAt = now
@@ -649,10 +652,10 @@ func (pm *ProxyManager) GetAvailableProxy() (id int64, proxyStr string, err erro
 		}
 
 		if !resp.Success {
-			// API trả về error - đánh dấu error, giữ running=true
+			// API trả về error - đánh dấu error, clear thread_id
 			errMsg := fmt.Sprintf("kiotproxy api returned code: %d, message: %s, error: %s", resp.Code, resp.Message, resp.Error)
 			pm.mu.Lock()
-			pm.db.Exec(`UPDATE proxies SET error=?, updated_at=? WHERE id=?`, errMsg, now, p.ID)
+			pm.db.Exec(`UPDATE proxies SET error=?, thread_id=NULL, updated_at=? WHERE id=?`, errMsg, now, p.ID)
 			if cached, ok := pm.proxyCache[p.ID]; ok {
 				cached.Error = errMsg
 				cached.UpdatedAt = now
@@ -745,6 +748,78 @@ func (pm *ProxyManager) GetErrorProxies() ([]ErrorProxy, error) {
 	}
 
 	return errorProxies, nil
+}
+
+// ProxyRecord chứa thông tin proxy để hiển thị
+type ProxyRecord struct {
+	ID          int64
+	Type        ProxyType
+	ProxyStr    string
+	ApiKey      string
+	ChangeUrl   string
+	MinTime     int
+	Running     bool
+	Used        int
+	Unique      bool
+	LastIP      string
+	LastChanged time.Time
+	ThreadId    *int // Thread đang sử dụng proxy này (nil nếu không có)
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
+// GetAllProxies trả về danh sách tất cả proxy không bị lỗi
+func (pm *ProxyManager) GetAllProxies() ([]ProxyRecord, error) {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+
+	rows, err := pm.db.Query(`
+		SELECT id, type, proxy_str, api_key, change_url, min_time, running, used, is_unique, last_ip, last_changed, thread_id, created_at, updated_at
+		FROM proxies
+		WHERE error IS NULL OR error = ''
+		ORDER BY id ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var proxies []ProxyRecord
+	for rows.Next() {
+		var p ProxyRecord
+		var apiKey sql.NullString
+		var proxyStr sql.NullString
+		var changeUrl sql.NullString
+		var lastIP sql.NullString
+		var lastChangedUnix sql.NullInt64
+		var threadId sql.NullInt64
+		err := rows.Scan(&p.ID, &p.Type, &proxyStr, &apiKey, &changeUrl, &p.MinTime, &p.Running, &p.Used, &p.Unique, &lastIP, &lastChangedUnix, &threadId, &p.CreatedAt, &p.UpdatedAt)
+		if err != nil {
+			return nil, err
+		}
+		if apiKey.Valid {
+			p.ApiKey = apiKey.String
+		}
+		if proxyStr.Valid {
+			p.ProxyStr = proxyStr.String
+		}
+		if changeUrl.Valid {
+			p.ChangeUrl = changeUrl.String
+		}
+		if lastIP.Valid {
+			p.LastIP = lastIP.String
+		}
+		if lastChangedUnix.Valid {
+			p.LastChanged = time.Unix(lastChangedUnix.Int64, 0)
+		}
+		if threadId.Valid {
+			tid := int(threadId.Int64)
+			p.ThreadId = &tid
+		}
+		proxies = append(proxies, p)
+	}
+
+	return proxies, nil
 }
 
 // ClearProxyError xóa lỗi của proxy để có thể sử dụng lại
