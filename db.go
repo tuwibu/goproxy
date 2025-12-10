@@ -276,7 +276,7 @@ func (pm *ProxyManager) LoadProxiesFromList(proxyStrings []string) ([]int64, err
 					needGetNew = true
 				} else {
 					// Có proxy nhưng chưa đủ điều kiện thay
-					proxyStr = fmt.Sprintf("%s::", resp.Data.HTTP)
+					proxyStr = resp.Data.HTTP
 
 					// Tính lastChanged: còn bao nhiêu giây phải đợi
 					remainingSeconds := int(nextRequestAtUnix - nowUnix)
@@ -662,7 +662,7 @@ func (pm *ProxyManager) GetAvailableProxy() (id int64, proxyStr string, err erro
 		}
 
 		// GetNewProxy thành công - update proxy mới, reset used=1, giữ running=true, clear error
-		newProxyStr := fmt.Sprintf("%s::", resp.Data.HTTP)
+		newProxyStr := resp.Data.HTTP
 
 		pm.mu.Lock()
 		pm.db.Exec(`UPDATE proxies SET proxy_str=?, last_changed=?, used=1, error='', updated_at=? WHERE id=?`, newProxyStr, now.Unix(), now, p.ID)
