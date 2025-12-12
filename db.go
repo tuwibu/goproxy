@@ -57,7 +57,7 @@ func (pm *ProxyManager) initSchema() error {
 	pm.db.Exec(`ALTER TABLE proxies ADD COLUMN is_unique INTEGER DEFAULT 0`)
 
 	// Migration: Cập nhật is_unique=1 cho các proxy type cũ
-	pm.db.Exec(`UPDATE proxies SET is_unique=1 WHERE type IN ('tmproxy', 'mobilehop', 'static', 'kiotproxy')`)
+	pm.db.Exec(`UPDATE proxies SET is_unique=1 WHERE type IN ('tmproxy', 'mobilehop', 'static', 'kiotproxy', 'auto')`)
 
 	// Migration: Thêm cột thread_id nếu chưa tồn tại
 	pm.db.Exec(`ALTER TABLE proxies ADD COLUMN thread_id INTEGER`)
@@ -135,9 +135,9 @@ func (pm *ProxyManager) LoadProxiesFromList(proxyStrings []string) ([]int64, err
 		unique := false
 
 		// Xác định unique theo loại proxy
-		// tmproxy, mobilehop, static, kiotproxy: unique = true
+		// tmproxy, mobilehop, static, kiotproxy, auto: unique = true
 		// sticky: có thể truyền true/false, default = false
-		if pType == ProxyTypeTMProxy || pType == ProxyTypeMobileHop || pType == ProxyTypeStatic || pType == ProxyTypeKiotProxy {
+		if pType == ProxyTypeTMProxy || pType == ProxyTypeMobileHop || pType == ProxyTypeStatic || pType == ProxyTypeKiotProxy || pType == ProxyTypeAuto {
 			unique = true
 		}
 
@@ -406,6 +406,7 @@ func (pm *ProxyManager) GetAvailableProxy(threadId int) (id int64, proxyStr stri
 	// - sticky non-unique (is_unique=0): không check gì, chỉ cần error rỗng
 	// - static: running=0 AND used < maxUsed (KHÔNG có refresh)
 	// - mobilehop: running=0 (luôn change_url khi lấy, không check used/min_time)
+	// - auto: running=0 (chỉ cấm sử dụng đồng thời, không giới hạn count)
 	// - tmproxy/kiotproxy/sticky(unique): running=0 AND (used < maxUsed OR đủ min_time)
 	rows, err := pm.db.Query(`
 		SELECT id, type, proxy_str, api_key, change_url, min_time, running, used, is_unique, last_ip, last_changed, error, created_at, updated_at
@@ -421,8 +422,11 @@ func (pm *ProxyManager) GetAvailableProxy(threadId int) (id int64, proxyStr stri
 			-- mobilehop: chỉ check running=0
 			(type = 'mobilehop' AND running=0)
 			OR
+			-- auto: chỉ check running=0
+			(type = 'auto' AND running=0)
+			OR
 			-- tmproxy/kiotproxy/sticky(unique): logic đầy đủ
-			(type NOT IN ('static', 'mobilehop') AND is_unique = 1 AND running=0 AND (
+			(type NOT IN ('static', 'mobilehop', 'auto') AND is_unique = 1 AND running=0 AND (
 				used < ?
 				OR
 				(min_time = 0 OR (last_changed IS NULL OR (? - last_changed >= min_time)))
@@ -692,13 +696,16 @@ func (pm *ProxyManager) GetAvailableProxy(threadId int) (id int64, proxyStr stri
 	}
 
 	// Không đủ điều kiện restart: update used++ và trả về proxy hiện tại
-	pm.mu.Lock()
-	pm.db.Exec(`UPDATE proxies SET used=used+1, updated_at=? WHERE id=?`, now, p.ID)
-	if cached, ok := pm.proxyCache[p.ID]; ok {
-		cached.Used = cached.Used + 1
-		cached.UpdatedAt = now
+	// Auto không tăng used (không giới hạn count)
+	if p.Type != ProxyTypeAuto {
+		pm.mu.Lock()
+		pm.db.Exec(`UPDATE proxies SET used=used+1, updated_at=? WHERE id=?`, now, p.ID)
+		if cached, ok := pm.proxyCache[p.ID]; ok {
+			cached.Used = cached.Used + 1
+			cached.UpdatedAt = now
+		}
+		pm.mu.Unlock()
 	}
-	pm.mu.Unlock()
 
 	return p.ID, p.ProxyStr, nil
 }
