@@ -57,7 +57,7 @@ func (pm *ProxyManager) initSchema() error {
 	pm.db.Exec(`ALTER TABLE proxies ADD COLUMN is_unique INTEGER DEFAULT 0`)
 
 	// Migration: Cập nhật is_unique=1 cho các proxy type cũ
-	pm.db.Exec(`UPDATE proxies SET is_unique=1 WHERE type IN ('tmproxy', 'mobilehop', 'static', 'kiotproxy', 'auto')`)
+	pm.db.Exec(`UPDATE proxies SET is_unique=1 WHERE type IN ('tmproxy', 'mobilehop', 'static', 'kiotproxy', 'auto', 'ipv4xoay')`)
 
 	// Migration: Thêm cột thread_id nếu chưa tồn tại
 	pm.db.Exec(`ALTER TABLE proxies ADD COLUMN thread_id INTEGER`)
@@ -135,9 +135,9 @@ func (pm *ProxyManager) LoadProxiesFromList(proxyStrings []string) ([]int64, err
 		unique := false
 
 		// Xác định unique theo loại proxy
-		// tmproxy, mobilehop, static, kiotproxy, auto: unique = true
+		// tmproxy, mobilehop, static, kiotproxy, auto, ipv4xoay: unique = true
 		// sticky: có thể truyền true/false, default = false
-		if pType == ProxyTypeTMProxy || pType == ProxyTypeMobileHop || pType == ProxyTypeStatic || pType == ProxyTypeKiotProxy || pType == ProxyTypeAuto {
+		if pType == ProxyTypeTMProxy || pType == ProxyTypeMobileHop || pType == ProxyTypeStatic || pType == ProxyTypeKiotProxy || pType == ProxyTypeAuto || pType == ProxyTypeIPv4Xoay {
 			unique = true
 		}
 
@@ -311,6 +311,26 @@ func (pm *ProxyManager) LoadProxiesFromList(proxyStrings []string) ([]int64, err
 			}
 		}
 
+		// IPv4Xoay: lấy proxy từ API (phương án 3: retry tự động nếu bị block)
+		if pType == ProxyTypeIPv4Xoay && apiKey != "" {
+			resp, err := service.GetIPv4Xoay().GetCurrentProxy(apiKey)
+
+			if err != nil {
+				// Lỗi network hoặc parsing
+				proxyError = fmt.Sprintf("GetCurrentProxy failed: %v", err)
+				lastChanged = time.Now()
+			} else if resp == nil {
+				// Status 101 (bị block): phương án 3 - không set error, thử lại sau
+				// Không set proxyError, sẽ để proxy có cơ hội thử lại
+				// Giữ proxyStr trống, sẽ xử lý khi GetAvailableProxy
+				lastChanged = time.Now()
+			} else {
+				// Status 100: thành công
+				proxyStr = resp.ProxyHTTP
+				lastChanged = time.Now()
+			}
+		}
+
 		// Sticky: lưu proxyStr gốc (có ${random}), sẽ xử lý khi GetAvailableProxy
 
 		// Với các loại proxy khác (static, sticky, mobilehop), lastChanged = now
@@ -318,9 +338,9 @@ func (pm *ProxyManager) LoadProxiesFromList(proxyStrings []string) ([]int64, err
 			lastChanged = time.Now()
 		}
 
-		// Tính uniqueKey: MD5 hash của apiKey (tmproxy/kiotproxy) hoặc proxyStr (static/mobilehop/sticky)
+		// Tính uniqueKey: MD5 hash của apiKey (tmproxy/kiotproxy/ipv4xoay) hoặc proxyStr (static/mobilehop/sticky)
 		var uniqueKey string
-		if pType == ProxyTypeTMProxy || pType == ProxyTypeKiotProxy {
+		if pType == ProxyTypeTMProxy || pType == ProxyTypeKiotProxy || pType == ProxyTypeIPv4Xoay {
 			uniqueKey = fmt.Sprintf("%x", md5.Sum([]byte(apiKey)))
 		} else {
 			// Với sticky, dùng proxyStr gốc (chưa thay ${random}) để tính uniqueKey
@@ -398,7 +418,7 @@ func (pm *ProxyManager) upsertProxy(pType ProxyType, proxyStr, apiKey, changeUrl
 }
 
 func (pm *ProxyManager) GetAvailableProxy(threadId int) (id int64, proxyStr string, err error) {
-	pm.mu.RLock()
+	pm.mu.Lock() // Dùng Lock thay vì RLock để tránh race condition
 	now := time.Now()
 	nowUnix := now.Unix()
 
@@ -407,6 +427,7 @@ func (pm *ProxyManager) GetAvailableProxy(threadId int) (id int64, proxyStr stri
 	// - static: running=0 AND used < maxUsed (KHÔNG có refresh)
 	// - mobilehop: running=0 (luôn change_url khi lấy, không check used/min_time)
 	// - auto: running=0 (chỉ cấm sử dụng đồng thời, không giới hạn count)
+	// - ipv4xoay: running=0 AND (used < maxUsed OR đủ min_time) - giống tmproxy/kiotproxy
 	// - tmproxy/kiotproxy/sticky(unique): running=0 AND (used < maxUsed OR đủ min_time)
 	rows, err := pm.db.Query(`
 		SELECT id, type, proxy_str, api_key, change_url, min_time, running, used, is_unique, last_ip, last_changed, error, created_at, updated_at
@@ -425,7 +446,7 @@ func (pm *ProxyManager) GetAvailableProxy(threadId int) (id int64, proxyStr stri
 			-- auto: chỉ check running=0
 			(type = 'auto' AND running=0)
 			OR
-			-- tmproxy/kiotproxy/sticky(unique): logic đầy đủ
+			-- tmproxy/kiotproxy/ipv4xoay/sticky(unique): logic đầy đủ
 			(type NOT IN ('static', 'mobilehop', 'auto') AND is_unique = 1 AND running=0 AND (
 				used < ?
 				OR
@@ -440,13 +461,13 @@ func (pm *ProxyManager) GetAvailableProxy(threadId int) (id int64, proxyStr stri
 	`, pm.maxUsed, pm.maxUsed, nowUnix)
 
 	if err != nil {
-		pm.mu.RUnlock()
+		pm.mu.Unlock()
 		return 0, "", err
 	}
 
 	if !rows.Next() {
 		rows.Close()
-		pm.mu.RUnlock()
+		pm.mu.Unlock()
 		return 0, "", fmt.Errorf("no available proxy")
 	}
 
@@ -458,9 +479,9 @@ func (pm *ProxyManager) GetAvailableProxy(threadId int) (id int64, proxyStr stri
 	var changeUrl sql.NullString
 	err = rows.Scan(&p.ID, &p.Type, &p.ProxyStr, &apiKey, &changeUrl, &p.MinTime, &p.Running, &p.Used, &p.Unique, &lastIP, &lastChangedUnix, &errStr, &p.CreatedAt, &p.UpdatedAt)
 	rows.Close()
-	pm.mu.RUnlock()
 
 	if err != nil {
+		pm.mu.Unlock()
 		return 0, "", err
 	}
 
@@ -482,6 +503,7 @@ func (pm *ProxyManager) GetAvailableProxy(threadId int) (id int64, proxyStr stri
 
 	// Proxy không unique: không cần set running/used, chỉ cần xử lý proxyStr và trả về
 	if !p.Unique {
+		pm.mu.Unlock()
 		// Sticky: xử lý proxyStr để thay thế ${random}
 		if p.Type == ProxyTypeSticky {
 			processedProxyStr := processStickyProxyStr(p.ProxyStr)
@@ -492,7 +514,7 @@ func (pm *ProxyManager) GetAvailableProxy(threadId int) (id int64, proxyStr stri
 	}
 
 	// Acquire proxy: set running=true và thread_id trước (chưa tăng used)
-	pm.mu.Lock()
+	// Đã giữ Lock từ đầu hàm, không cần Lock lại
 	if _, err := pm.db.Exec(`UPDATE proxies SET running=true, thread_id=?, updated_at=? WHERE id=?`, threadId, now, p.ID); err != nil {
 		pm.mu.Unlock()
 		return 0, "", fmt.Errorf("failed to acquire proxy: %v", err)
@@ -501,7 +523,7 @@ func (pm *ProxyManager) GetAvailableProxy(threadId int) (id int64, proxyStr stri
 		cached.Running = true
 		cached.UpdatedAt = now
 	}
-	pm.mu.Unlock()
+	pm.mu.Unlock() // Unlock sau khi đã set running=true
 
 	// Kiểm tra điều kiện restart: last_changed + min_time <= time hiện tại
 	timeSinceLastChange := now.Sub(p.LastChanged).Seconds()
@@ -670,6 +692,61 @@ func (pm *ProxyManager) GetAvailableProxy(threadId int) (id int64, proxyStr stri
 
 		// GetNewProxy thành công - update proxy mới, reset used=1, giữ running=true, clear error
 		newProxyStr := resp.Data.HTTP
+
+		pm.mu.Lock()
+		pm.db.Exec(`UPDATE proxies SET proxy_str=?, last_changed=?, used=1, error='', updated_at=? WHERE id=?`, newProxyStr, now.Unix(), now, p.ID)
+		if cached, ok := pm.proxyCache[p.ID]; ok {
+			cached.ProxyStr = newProxyStr
+			cached.LastChanged = now
+			cached.Used = 1
+			cached.Error = ""
+			cached.UpdatedAt = now
+		}
+		pm.mu.Unlock()
+
+		p.ProxyStr = newProxyStr
+		p.LastChanged = now
+		p.Error = ""
+		p.UpdatedAt = now
+
+		// Đợi ChangeProxyWaitTime trước khi trả result
+		if pm.changeProxyWaitTime > 0 {
+			time.Sleep(pm.changeProxyWaitTime)
+		}
+
+		return p.ID, p.ProxyStr, nil
+	}
+
+	// IPv4Xoay: restart nếu đủ điều kiện (phương án 3: retry tự động nếu bị block)
+	if p.Type == ProxyTypeIPv4Xoay && canChangeIP && p.ApiKey != "" {
+		// IPv4Xoay: gọi GetNewProxy
+		resp, err := service.GetIPv4Xoay().GetNewProxy(p.ApiKey)
+		if err != nil {
+			// GetNewProxy thất bại - đánh dấu error, clear thread_id
+			errMsg := fmt.Sprintf("GetNewProxy failed: %v", err)
+			pm.mu.Lock()
+			pm.db.Exec(`UPDATE proxies SET error=?, thread_id=NULL, updated_at=? WHERE id=?`, errMsg, now, p.ID)
+			if cached, ok := pm.proxyCache[p.ID]; ok {
+				cached.Error = errMsg
+				cached.UpdatedAt = now
+			}
+			pm.mu.Unlock()
+			return 0, "", fmt.Errorf("%s", errMsg)
+		}
+
+		if resp == nil {
+			// Status 101 (bị block): phương án 3 - không set error, clear thread_id, retry sau
+			pm.mu.Lock()
+			pm.db.Exec(`UPDATE proxies SET thread_id=NULL, updated_at=? WHERE id=?`, now, p.ID)
+			if cached, ok := pm.proxyCache[p.ID]; ok {
+				cached.UpdatedAt = now
+			}
+			pm.mu.Unlock()
+			return 0, "", fmt.Errorf("ipv4xoay api is blocking (status 101), will retry later")
+		}
+
+		// Status 100: GetNewProxy thành công - update proxy mới, reset used=1, giữ running=true, clear error
+		newProxyStr := resp.ProxyHTTP
 
 		pm.mu.Lock()
 		pm.db.Exec(`UPDATE proxies SET proxy_str=?, last_changed=?, used=1, error='', updated_at=? WHERE id=?`, newProxyStr, now.Unix(), now, p.ID)
