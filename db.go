@@ -423,7 +423,7 @@ func (pm *ProxyManager) GetAvailableProxy(threadId int) (id int64, proxyStr stri
 	nowUnix := now.Unix()
 
 	// Điều kiện theo từng loại proxy:
-	// - sticky non-unique (is_unique=0): không check gì, chỉ cần error rỗng
+	// - sticky non-unique (is_unique=0): không check gì
 	// - static: running=0 AND used < maxUsed (KHÔNG có refresh)
 	// - mobilehop: running=0 (luôn change_url khi lấy, không check used/min_time)
 	// - auto: running=0 (chỉ cấm sử dụng đồng thời, không giới hạn count)
@@ -432,8 +432,7 @@ func (pm *ProxyManager) GetAvailableProxy(threadId int) (id int64, proxyStr stri
 	rows, err := pm.db.Query(`
 		SELECT id, type, proxy_str, api_key, change_url, min_time, running, used, is_unique, last_ip, last_changed, error, created_at, updated_at
 		FROM proxies
-		WHERE (error IS NULL OR error='')
-		AND (
+		WHERE (
 			-- sticky non-unique: không check gì
 			(is_unique = 0)
 			OR
