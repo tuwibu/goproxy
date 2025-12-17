@@ -562,12 +562,13 @@ func (pm *ProxyManager) GetAvailableProxy(threadId int) (id int64, proxyStr stri
 		// TMProxy: gọi GetNewProxy
 		resp, err := service.GetTMProxy().GetNewProxy(p.ApiKey, 0, 0)
 		if err != nil {
-			// GetNewProxy thất bại - đánh dấu error, clear thread_id
+			// GetNewProxy thất bại - đánh dấu error, set running=0, clear thread_id
 			errMsg := fmt.Sprintf("GetNewProxy failed: %v", err)
 			pm.mu.Lock()
-			pm.db.Exec(`UPDATE proxies SET error=?, thread_id=NULL, updated_at=? WHERE id=?`, errMsg, now, p.ID)
+			pm.db.Exec(`UPDATE proxies SET error=?, running=0, thread_id=NULL, updated_at=? WHERE id=?`, errMsg, now, p.ID)
 			if cached, ok := pm.proxyCache[p.ID]; ok {
 				cached.Error = errMsg
+				cached.Running = false
 				cached.UpdatedAt = now
 			}
 			pm.mu.Unlock()
@@ -575,12 +576,13 @@ func (pm *ProxyManager) GetAvailableProxy(threadId int) (id int64, proxyStr stri
 		}
 
 		if resp.Code != 0 {
-			// API trả về error code - đánh dấu error, clear thread_id
+			// API trả về error code - đánh dấu error, set running=0, clear thread_id
 			errMsg := fmt.Sprintf("tmproxy api returned code: %d, message: %s", resp.Code, resp.Message)
 			pm.mu.Lock()
-			pm.db.Exec(`UPDATE proxies SET error=?, thread_id=NULL, updated_at=? WHERE id=?`, errMsg, now, p.ID)
+			pm.db.Exec(`UPDATE proxies SET error=?, running=0, thread_id=NULL, updated_at=? WHERE id=?`, errMsg, now, p.ID)
 			if cached, ok := pm.proxyCache[p.ID]; ok {
 				cached.Error = errMsg
+				cached.Running = false
 				cached.UpdatedAt = now
 			}
 			pm.mu.Unlock()
@@ -664,12 +666,13 @@ func (pm *ProxyManager) GetAvailableProxy(threadId int) (id int64, proxyStr stri
 		// KiotProxy: gọi GetNewProxy
 		resp, err := service.GetKiotProxy().GetNewProxy(p.ApiKey, region)
 		if err != nil {
-			// GetNewProxy thất bại - đánh dấu error, clear thread_id
+			// GetNewProxy thất bại - đánh dấu error, set running=0, clear thread_id
 			errMsg := fmt.Sprintf("GetNewProxy failed: %v", err)
 			pm.mu.Lock()
-			pm.db.Exec(`UPDATE proxies SET error=?, thread_id=NULL, updated_at=? WHERE id=?`, errMsg, now, p.ID)
+			pm.db.Exec(`UPDATE proxies SET error=?, running=0, thread_id=NULL, updated_at=? WHERE id=?`, errMsg, now, p.ID)
 			if cached, ok := pm.proxyCache[p.ID]; ok {
 				cached.Error = errMsg
+				cached.Running = false
 				cached.UpdatedAt = now
 			}
 			pm.mu.Unlock()
@@ -677,12 +680,13 @@ func (pm *ProxyManager) GetAvailableProxy(threadId int) (id int64, proxyStr stri
 		}
 
 		if !resp.Success {
-			// API trả về error - đánh dấu error, clear thread_id
+			// API trả về error - đánh dấu error, set running=0, clear thread_id
 			errMsg := fmt.Sprintf("kiotproxy api returned code: %d, message: %s, error: %s", resp.Code, resp.Message, resp.Error)
 			pm.mu.Lock()
-			pm.db.Exec(`UPDATE proxies SET error=?, thread_id=NULL, updated_at=? WHERE id=?`, errMsg, now, p.ID)
+			pm.db.Exec(`UPDATE proxies SET error=?, running=0, thread_id=NULL, updated_at=? WHERE id=?`, errMsg, now, p.ID)
 			if cached, ok := pm.proxyCache[p.ID]; ok {
 				cached.Error = errMsg
+				cached.Running = false
 				cached.UpdatedAt = now
 			}
 			pm.mu.Unlock()
@@ -721,12 +725,13 @@ func (pm *ProxyManager) GetAvailableProxy(threadId int) (id int64, proxyStr stri
 		// IPv4Xoay: gọi GetNewProxy
 		resp, err := service.GetIPv4Xoay().GetNewProxy(p.ApiKey)
 		if err != nil {
-			// GetNewProxy thất bại - đánh dấu error, clear thread_id
+			// GetNewProxy thất bại - đánh dấu error, set running=0, clear thread_id
 			errMsg := fmt.Sprintf("GetNewProxy failed: %v", err)
 			pm.mu.Lock()
-			pm.db.Exec(`UPDATE proxies SET error=?, thread_id=NULL, updated_at=? WHERE id=?`, errMsg, now, p.ID)
+			pm.db.Exec(`UPDATE proxies SET error=?, running=0, thread_id=NULL, updated_at=? WHERE id=?`, errMsg, now, p.ID)
 			if cached, ok := pm.proxyCache[p.ID]; ok {
 				cached.Error = errMsg
+				cached.Running = false
 				cached.UpdatedAt = now
 			}
 			pm.mu.Unlock()
@@ -734,10 +739,11 @@ func (pm *ProxyManager) GetAvailableProxy(threadId int) (id int64, proxyStr stri
 		}
 
 		if resp == nil {
-			// Status 101 (bị block): phương án 3 - không set error, clear thread_id, retry sau
+			// Status 101 (bị block): phương án 3 - không set error, set running=0, clear thread_id, retry sau
 			pm.mu.Lock()
-			pm.db.Exec(`UPDATE proxies SET thread_id=NULL, updated_at=? WHERE id=?`, now, p.ID)
+			pm.db.Exec(`UPDATE proxies SET running=0, thread_id=NULL, updated_at=? WHERE id=?`, now, p.ID)
 			if cached, ok := pm.proxyCache[p.ID]; ok {
+				cached.Running = false
 				cached.UpdatedAt = now
 			}
 			pm.mu.Unlock()
