@@ -446,7 +446,7 @@ func (pm *ProxyManager) upsertProxy(pType ProxyType, proxyStr, apiKey, changeUrl
 	var id int64
 	pm.db.QueryRow(`SELECT id FROM proxies WHERE unique_key=?`, uniqueKey).Scan(&id)
 
-	// Update cache để đồng bộ với DB
+	// Update hoặc tạo mới cache entry
 	if cached, ok := pm.proxyCache[id]; ok {
 		cached.ProxyStr = proxyStr
 		cached.ConnectionInfo = connectionInfo
@@ -456,6 +456,24 @@ func (pm *ProxyManager) upsertProxy(pType ProxyType, proxyStr, apiKey, changeUrl
 		cached.LastChanged = lastChanged
 		cached.Error = proxyError
 		cached.UpdatedAt = now
+	} else {
+		// Tạo mới cache entry nếu chưa có
+		pm.proxyCache[id] = &Proxy{
+			ID:             id,
+			Type:           pType,
+			ProxyStr:       proxyStr,
+			ConnectionInfo: connectionInfo,
+			ApiKey:         apiKey,
+			ChangeUrl:      changeUrl,
+			MinTime:        minTime,
+			Running:        false,
+			Used:           0,
+			Unique:         unique,
+			LastChanged:    lastChanged,
+			Error:          proxyError,
+			CreatedAt:      now,
+			UpdatedAt:      now,
+		}
 	}
 
 	return id, nil
