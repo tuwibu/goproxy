@@ -87,6 +87,32 @@ func (pm *ProxyManager) getConnectionString(p Proxy, fallback string) string {
 	return fallback
 }
 
+// restartDumbProxyInstance restart dumbproxy instance với upstream mới
+// Được gọi khi proxy_str thay đổi (TMProxy, KiotProxy đổi IP)
+// Trả về connection_info mới và cập nhật vào database/cache
+func (pm *ProxyManager) restartDumbProxyInstance(proxyID int64, newProxyStr string) string {
+	if !pm.isBlockAssets {
+		return newProxyStr
+	}
+
+	// Restart dumbproxy instance với upstream mới
+	connectionInfo, err := GetDumbProxyManager().StartInstance(proxyID, newProxyStr)
+	if err != nil {
+		// Nếu restart thất bại, trả về proxy_str gốc
+		return newProxyStr
+	}
+
+	// Update connection_info trong database
+	pm.db.Exec(`UPDATE proxies SET connection_info=? WHERE id=?`, connectionInfo, proxyID)
+
+	// Update cache
+	if cached, ok := pm.proxyCache[proxyID]; ok {
+		cached.ConnectionInfo = connectionInfo
+	}
+
+	return connectionInfo
+}
+
 // generateRandomString tạo chuỗi ngẫu nhiên với độ dài cho trước
 func generateRandomString(length int) string {
 	bytes := make([]byte, length/2)
@@ -630,6 +656,10 @@ func (pm *ProxyManager) GetAvailableProxy(threadId int) (id int64, proxyStr stri
 		p.Error = ""
 		p.UpdatedAt = now
 
+		// Restart dumbproxy instance với upstream mới (nếu IsBlockAssets=true)
+		connectionInfo := pm.restartDumbProxyInstance(p.ID, newProxyStr)
+		p.ConnectionInfo = connectionInfo
+
 		// Đợi ChangeProxyWaitTime trước khi trả result
 		if pm.changeProxyWaitTime > 0 {
 			time.Sleep(pm.changeProxyWaitTime)
@@ -734,6 +764,10 @@ func (pm *ProxyManager) GetAvailableProxy(threadId int) (id int64, proxyStr stri
 		p.Error = ""
 		p.UpdatedAt = now
 
+		// Restart dumbproxy instance với upstream mới (nếu IsBlockAssets=true)
+		connectionInfo := pm.restartDumbProxyInstance(p.ID, newProxyStr)
+		p.ConnectionInfo = connectionInfo
+
 		// Đợi ChangeProxyWaitTime trước khi trả result
 		if pm.changeProxyWaitTime > 0 {
 			time.Sleep(pm.changeProxyWaitTime)
@@ -790,6 +824,10 @@ func (pm *ProxyManager) GetAvailableProxy(threadId int) (id int64, proxyStr stri
 		p.LastChanged = now
 		p.Error = ""
 		p.UpdatedAt = now
+
+		// Restart dumbproxy instance với upstream mới (nếu IsBlockAssets=true)
+		connectionInfo := pm.restartDumbProxyInstance(p.ID, newProxyStr)
+		p.ConnectionInfo = connectionInfo
 
 		// Đợi ChangeProxyWaitTime trước khi trả result
 		if pm.changeProxyWaitTime > 0 {
