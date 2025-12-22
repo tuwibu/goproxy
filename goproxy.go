@@ -22,20 +22,21 @@ const (
 
 // Proxy đại diện cho một proxy entry
 type Proxy struct {
-	ID          int64
-	Type        ProxyType
-	ProxyStr    string
-	ApiKey      string
-	ChangeUrl   string
-	MinTime     int  // thời gian tối thiểu giữa các lần thay đổi (giây)
-	Running     bool // cờ chỉ proxy có đang được sử dụng hay không
-	Used        int  // số lần proxy đã được sử dụng
-	Unique      bool // có check running hay không (tmproxy/mobilehop/static=true, sticky=tùy chỉnh)
-	LastChanged time.Time
-	LastIP      string
-	Error       string // lỗi nếu GetNewProxy thất bại
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	ID             int64
+	Type           ProxyType
+	ProxyStr       string
+	ConnectionInfo string // Connection string thực tế để sử dụng (localhost:port nếu IsBlockAssets, hoặc = ProxyStr)
+	ApiKey         string
+	ChangeUrl      string
+	MinTime        int  // thời gian tối thiểu giữa các lần thay đổi (giây)
+	Running        bool // cờ chỉ proxy có đang được sử dụng hay không
+	Used           int  // số lần proxy đã được sử dụng
+	Unique         bool // có check running hay không (tmproxy/mobilehop/static=true, sticky=tùy chỉnh)
+	LastChanged    time.Time
+	LastIP         string
+	Error          string // lỗi nếu GetNewProxy thất bại
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 // ProxyManager quản lý danh sách proxy (Singleton)
@@ -44,6 +45,7 @@ type ProxyManager struct {
 	mu                  sync.RWMutex
 	changeProxyWaitTime time.Duration
 	maxUsed             int
+	isBlockAssets       bool // Cờ đánh dấu có bật chế độ block assets hay không
 	proxyCache          map[int64]*Proxy
 	initialized         bool
 }
@@ -96,12 +98,20 @@ type Config struct {
 	ProxyStrings        []string
 	ClearAllProxy       bool
 	MaxUsed             int
+	IsBlockAssets       bool // Nếu true, tạo local dumbproxy instance để block static assets
 }
 
 func (pm *ProxyManager) SetConfig(config Config) error {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	pm.changeProxyWaitTime = config.ChangeProxyWaitTime
+
+	// Nếu IsBlockAssets thay đổi hoặc ClearAllProxy, dừng tất cả dumbproxy instances
+	if config.ClearAllProxy || pm.isBlockAssets != config.IsBlockAssets {
+		GetDumbProxyManager().StopAll()
+	}
+
+	pm.isBlockAssets = config.IsBlockAssets
 
 	if config.ClearAllProxy {
 		pm.db.Exec("DELETE FROM proxies")
@@ -117,9 +127,25 @@ func (pm *ProxyManager) SetConfig(config Config) error {
 		}
 	}
 
-	_, err := pm.LoadProxiesFromList(config.ProxyStrings)
+	ids, err := pm.LoadProxiesFromList(config.ProxyStrings)
 	if err != nil {
 		return fmt.Errorf("failed to load proxies: %w", err)
+	}
+
+	// Nếu IsBlockAssets được bật, khởi động dumbproxy instances
+	if config.IsBlockAssets {
+		for _, id := range ids {
+			if proxy, ok := pm.proxyCache[id]; ok && proxy.ProxyStr != "" {
+				connectionInfo, err := GetDumbProxyManager().StartInstance(id, proxy.ProxyStr)
+				if err != nil {
+					// Log error nhưng tiếp tục
+					continue
+				}
+				// Update connection_info trong database và cache
+				pm.db.Exec(`UPDATE proxies SET connection_info=? WHERE id=?`, connectionInfo, id)
+				proxy.ConnectionInfo = connectionInfo
+			}
+		}
 	}
 
 	// Lưu MaxUsed vào ProxyManager (thêm field mới)
