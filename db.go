@@ -92,10 +92,15 @@ func (pm *ProxyManager) getConnectionString(p Proxy, fallback string) string {
 // Trả về connection_info mới và cập nhật vào database/cache
 func (pm *ProxyManager) restartDumbProxyInstance(proxyID int64, newProxyStr string) string {
 	if !pm.isBlockAssets {
+		// IsBlockAssets = false: connection_info = proxy_str
+		pm.db.Exec(`UPDATE proxies SET connection_info=? WHERE id=?`, newProxyStr, proxyID)
+		if cached, ok := pm.proxyCache[proxyID]; ok {
+			cached.ConnectionInfo = newProxyStr
+		}
 		return newProxyStr
 	}
 
-	// Restart dumbproxy instance với upstream mới
+	// IsBlockAssets = true: restart dumbproxy instance với upstream mới
 	connectionInfo, err := GetDumbProxyManager().StartInstance(proxyID, newProxyStr)
 	if err != nil {
 		// Nếu restart thất bại, trả về proxy_str gốc
