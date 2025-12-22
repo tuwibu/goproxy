@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -15,6 +17,7 @@ import (
 )
 
 const BasePort = 20000
+const MaxPortRange = 100 // Kill ports từ BasePort đến BasePort + MaxPortRange
 
 // DumbProxyInstance đại diện cho một instance dumbproxy đang chạy
 type DumbProxyInstance struct {
@@ -139,14 +142,51 @@ func (m *DumbProxyManager) StopInstance(proxyID int64) error {
 	return nil
 }
 
-// StopAll dừng tất cả dumbproxy instances
+// StopAll dừng tất cả dumbproxy instances và kill zombie ports
 func (m *DumbProxyManager) StopAll() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
+	// Stop tất cả instances đang quản lý
 	for id, instance := range m.instances {
 		instance.Stop()
 		delete(m.instances, id)
+	}
+	m.mu.Unlock()
+
+	// Kill tất cả zombie processes đang chiếm port range
+	m.KillPortRange()
+}
+
+// KillPortRange kill tất cả process đang chiếm port từ BasePort đến BasePort + MaxPortRange
+// Hữu ích khi chương trình bị crash và port vẫn bị chiếm
+func (m *DumbProxyManager) KillPortRange() {
+	if runtime.GOOS == "windows" {
+		m.killPortRangeWindows()
+	} else {
+		m.killPortRangeUnix()
+	}
+}
+
+func (m *DumbProxyManager) killPortRangeWindows() {
+	// Dùng netstat + taskkill (nhanh hơn PowerShell)
+	// Tìm tất cả PID đang listen trên port range rồi kill
+	for port := BasePort; port <= BasePort+MaxPortRange; port++ {
+		// Thử kết nối để check port có đang được sử dụng không
+		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 100*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			// Port đang được sử dụng, kill process bằng PowerShell (chỉ kill port cụ thể)
+			script := fmt.Sprintf(`(Get-NetTCPConnection -LocalPort %d -ErrorAction SilentlyContinue).OwningProcess | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }`, port)
+			cmd := exec.Command("powershell", "-NoProfile", "-Command", script)
+			cmd.Run()
+		}
+	}
+}
+
+func (m *DumbProxyManager) killPortRangeUnix() {
+	// Dùng lsof và kill trên Unix/Linux/Mac
+	for port := BasePort; port <= BasePort+MaxPortRange; port++ {
+		cmd := exec.Command("sh", "-c", fmt.Sprintf("lsof -ti:%d | xargs -r kill -9", port))
+		cmd.Run() // Ignore errors
 	}
 }
 

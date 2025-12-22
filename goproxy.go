@@ -106,6 +106,7 @@ func (pm *ProxyManager) SetConfig(config Config) error {
 	pm.changeProxyWaitTime = config.ChangeProxyWaitTime
 
 	// Nếu IsBlockAssets thay đổi hoặc ClearAllProxy, dừng tất cả dumbproxy instances
+	// StopAll sẽ stop instances + kill zombie ports
 	if config.ClearAllProxy || pm.isBlockAssets != config.IsBlockAssets {
 		GetDumbProxyManager().StopAll()
 	}
@@ -135,11 +136,13 @@ func (pm *ProxyManager) SetConfig(config Config) error {
 	if config.IsBlockAssets {
 		for _, id := range ids {
 			if proxy, ok := pm.proxyCache[id]; ok && proxy.ProxyStr != "" {
-				_, err := GetDumbProxyManager().StartInstance(id, proxy.ProxyStr)
+				addr, err := GetDumbProxyManager().StartInstance(id, proxy.ProxyStr)
 				if err != nil {
 					// Log error nhưng tiếp tục
+					fmt.Printf("[DumbProxy] Failed to start instance for proxy %d: %v\n", id, err)
 					continue
 				}
+				fmt.Printf("[DumbProxy] Started instance for proxy %d at %s (upstream: %s)\n", id, addr, proxy.ProxyStr)
 			}
 		}
 	}
