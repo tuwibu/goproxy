@@ -22,21 +22,20 @@ const (
 
 // Proxy đại diện cho một proxy entry
 type Proxy struct {
-	ID             int64
-	Type           ProxyType
-	ProxyStr       string
-	ConnectionInfo string // Connection string thực tế để sử dụng (localhost:port nếu IsBlockAssets, hoặc = ProxyStr)
-	ApiKey         string
-	ChangeUrl      string
-	MinTime        int  // thời gian tối thiểu giữa các lần thay đổi (giây)
-	Running        bool // cờ chỉ proxy có đang được sử dụng hay không
-	Used           int  // số lần proxy đã được sử dụng
-	Unique         bool // có check running hay không (tmproxy/mobilehop/static=true, sticky=tùy chỉnh)
-	LastChanged    time.Time
-	LastIP         string
-	Error          string // lỗi nếu GetNewProxy thất bại
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	ID          int64
+	Type        ProxyType
+	ProxyStr    string
+	ApiKey      string
+	ChangeUrl   string
+	MinTime     int  // thời gian tối thiểu giữa các lần thay đổi (giây)
+	Running     bool // cờ chỉ proxy có đang được sử dụng hay không
+	Used        int  // số lần proxy đã được sử dụng
+	Unique      bool // có check running hay không (tmproxy/mobilehop/static=true, sticky=tùy chỉnh)
+	LastChanged time.Time
+	LastIP      string
+	Error       string // lỗi nếu GetNewProxy thất bại
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
 }
 
 // ProxyManager quản lý danh sách proxy (Singleton)
@@ -136,14 +135,11 @@ func (pm *ProxyManager) SetConfig(config Config) error {
 	if config.IsBlockAssets {
 		for _, id := range ids {
 			if proxy, ok := pm.proxyCache[id]; ok && proxy.ProxyStr != "" {
-				connectionInfo, err := GetDumbProxyManager().StartInstance(id, proxy.ProxyStr)
+				_, err := GetDumbProxyManager().StartInstance(id, proxy.ProxyStr)
 				if err != nil {
 					// Log error nhưng tiếp tục
 					continue
 				}
-				// Update connection_info trong database và cache
-				pm.db.Exec(`UPDATE proxies SET connection_info=? WHERE id=?`, connectionInfo, id)
-				proxy.ConnectionInfo = connectionInfo
 			}
 		}
 	}

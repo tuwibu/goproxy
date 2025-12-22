@@ -62,9 +62,6 @@ func (pm *ProxyManager) initSchema() error {
 	// Migration: Thêm cột thread_id nếu chưa tồn tại
 	pm.db.Exec(`ALTER TABLE proxies ADD COLUMN thread_id INTEGER`)
 
-	// Migration: Thêm cột connection_info cho IsBlockAssets feature
-	pm.db.Exec(`ALTER TABLE proxies ADD COLUMN connection_info TEXT`)
-
 	return nil
 }
 
@@ -77,45 +74,25 @@ func (pm *ProxyManager) Close() error {
 	return nil
 }
 
-// getConnectionString trả về connection string thực tế để sử dụng
-// Nếu IsBlockAssets = true và ConnectionInfo có giá trị, trả về ConnectionInfo
-// Ngược lại trả về fallback (thường là ProxyStr đã xử lý)
-func (pm *ProxyManager) getConnectionString(p Proxy, fallback string) string {
-	if pm.isBlockAssets && p.ConnectionInfo != "" {
-		return p.ConnectionInfo
+// getConnectionString trả về connection string để sử dụng
+// Nếu IsBlockAssets = true, trả về localhost:port (port = 20000 + proxyID)
+// Ngược lại trả về proxyStr
+func (pm *ProxyManager) getConnectionString(proxyID int64, proxyStr string) string {
+	if pm.isBlockAssets {
+		return fmt.Sprintf("127.0.0.1:%d", BasePort+int(proxyID))
 	}
-	return fallback
+	return proxyStr
 }
 
 // restartDumbProxyInstance restart dumbproxy instance với upstream mới
 // Được gọi khi proxy_str thay đổi (TMProxy, KiotProxy đổi IP)
-// Trả về connection_info mới và cập nhật vào database/cache
-func (pm *ProxyManager) restartDumbProxyInstance(proxyID int64, newProxyStr string) string {
+func (pm *ProxyManager) restartDumbProxyInstance(proxyID int64, newProxyStr string) {
 	if !pm.isBlockAssets {
-		// IsBlockAssets = false: connection_info = proxy_str
-		pm.db.Exec(`UPDATE proxies SET connection_info=? WHERE id=?`, newProxyStr, proxyID)
-		if cached, ok := pm.proxyCache[proxyID]; ok {
-			cached.ConnectionInfo = newProxyStr
-		}
-		return newProxyStr
+		return
 	}
 
 	// IsBlockAssets = true: restart dumbproxy instance với upstream mới
-	connectionInfo, err := GetDumbProxyManager().StartInstance(proxyID, newProxyStr)
-	if err != nil {
-		// Nếu restart thất bại, trả về proxy_str gốc
-		return newProxyStr
-	}
-
-	// Update connection_info trong database
-	pm.db.Exec(`UPDATE proxies SET connection_info=? WHERE id=?`, connectionInfo, proxyID)
-
-	// Update cache
-	if cached, ok := pm.proxyCache[proxyID]; ok {
-		cached.ConnectionInfo = connectionInfo
-	}
-
-	return connectionInfo
+	GetDumbProxyManager().StartInstance(proxyID, newProxyStr)
 }
 
 // generateRandomString tạo chuỗi ngẫu nhiên với độ dài cho trước
@@ -411,32 +388,28 @@ func (pm *ProxyManager) LoadProxiesFromList(proxyStrings []string) ([]int64, err
 func (pm *ProxyManager) upsertProxy(pType ProxyType, proxyStr, apiKey, changeUrl string, minTime int, uniqueKey string, unique bool, lastChanged time.Time, proxyError string) (int64, error) {
 	now := time.Now()
 
-	// Default connection_info = proxyStr (sẽ được cập nhật sau nếu IsBlockAssets = true)
-	connectionInfo := proxyStr
-
 	result, err := pm.db.Exec(
-		`INSERT INTO proxies (type, proxy_str, connection_info, api_key, unique_key, min_time, change_url, is_unique, last_changed, error, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		pType, proxyStr, connectionInfo, apiKey, uniqueKey, minTime, changeUrl, unique, lastChanged.Unix(), proxyError, now, now,
+		`INSERT INTO proxies (type, proxy_str, api_key, unique_key, min_time, change_url, is_unique, last_changed, error, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		pType, proxyStr, apiKey, uniqueKey, minTime, changeUrl, unique, lastChanged.Unix(), proxyError, now, now,
 	)
 
 	if err == nil {
 		id, _ := result.LastInsertId()
 		pm.proxyCache[id] = &Proxy{
-			ID:             id,
-			Type:           pType,
-			ProxyStr:       proxyStr,
-			ConnectionInfo: connectionInfo,
-			ApiKey:         apiKey,
-			ChangeUrl:      changeUrl,
-			MinTime:        minTime,
-			Running:        false,
-			Used:           0,
-			Unique:         unique,
-			LastChanged:    lastChanged,
-			Error:          proxyError,
-			CreatedAt:      now,
-			UpdatedAt:      now,
+			ID:          id,
+			Type:        pType,
+			ProxyStr:    proxyStr,
+			ApiKey:      apiKey,
+			ChangeUrl:   changeUrl,
+			MinTime:     minTime,
+			Running:     false,
+			Used:        0,
+			Unique:      unique,
+			LastChanged: lastChanged,
+			Error:       proxyError,
+			CreatedAt:   now,
+			UpdatedAt:   now,
 		}
 		return id, nil
 	}
@@ -445,8 +418,8 @@ func (pm *ProxyManager) upsertProxy(pType ProxyType, proxyStr, apiKey, changeUrl
 		return 0, err
 	}
 
-	pm.db.Exec(`UPDATE proxies SET proxy_str=?, connection_info=?, min_time=?, change_url=?, is_unique=?, last_changed=?, error=?, updated_at=? WHERE unique_key=?`,
-		proxyStr, connectionInfo, minTime, changeUrl, unique, lastChanged.Unix(), proxyError, now, uniqueKey)
+	pm.db.Exec(`UPDATE proxies SET proxy_str=?, min_time=?, change_url=?, is_unique=?, last_changed=?, error=?, updated_at=? WHERE unique_key=?`,
+		proxyStr, minTime, changeUrl, unique, lastChanged.Unix(), proxyError, now, uniqueKey)
 
 	var id int64
 	pm.db.QueryRow(`SELECT id FROM proxies WHERE unique_key=?`, uniqueKey).Scan(&id)
@@ -454,7 +427,6 @@ func (pm *ProxyManager) upsertProxy(pType ProxyType, proxyStr, apiKey, changeUrl
 	// Update hoặc tạo mới cache entry
 	if cached, ok := pm.proxyCache[id]; ok {
 		cached.ProxyStr = proxyStr
-		cached.ConnectionInfo = connectionInfo
 		cached.MinTime = minTime
 		cached.ChangeUrl = changeUrl
 		cached.Unique = unique
@@ -464,20 +436,19 @@ func (pm *ProxyManager) upsertProxy(pType ProxyType, proxyStr, apiKey, changeUrl
 	} else {
 		// Tạo mới cache entry nếu chưa có
 		pm.proxyCache[id] = &Proxy{
-			ID:             id,
-			Type:           pType,
-			ProxyStr:       proxyStr,
-			ConnectionInfo: connectionInfo,
-			ApiKey:         apiKey,
-			ChangeUrl:      changeUrl,
-			MinTime:        minTime,
-			Running:        false,
-			Used:           0,
-			Unique:         unique,
-			LastChanged:    lastChanged,
-			Error:          proxyError,
-			CreatedAt:      now,
-			UpdatedAt:      now,
+			ID:          id,
+			Type:        pType,
+			ProxyStr:    proxyStr,
+			ApiKey:      apiKey,
+			ChangeUrl:   changeUrl,
+			MinTime:     minTime,
+			Running:     false,
+			Used:        0,
+			Unique:      unique,
+			LastChanged: lastChanged,
+			Error:       proxyError,
+			CreatedAt:   now,
+			UpdatedAt:   now,
 		}
 	}
 
@@ -497,7 +468,7 @@ func (pm *ProxyManager) GetAvailableProxy(threadId int) (id int64, proxyStr stri
 	// - ipv4xoay: running=0 AND (used < maxUsed OR đủ min_time) - giống tmproxy/kiotproxy
 	// - tmproxy/kiotproxy/sticky(unique): running=0 AND (used < maxUsed OR đủ min_time)
 	rows, err := pm.db.Query(`
-		SELECT id, type, proxy_str, connection_info, api_key, change_url, min_time, running, used, is_unique, last_ip, last_changed, error, created_at, updated_at
+		SELECT id, type, proxy_str, api_key, change_url, min_time, running, used, is_unique, last_ip, last_changed, error, created_at, updated_at
 		FROM proxies
 		WHERE (
 			-- sticky non-unique: không check gì
@@ -543,8 +514,7 @@ func (pm *ProxyManager) GetAvailableProxy(threadId int) (id int64, proxyStr stri
 	var errStr sql.NullString
 	var apiKey sql.NullString
 	var changeUrl sql.NullString
-	var connectionInfo sql.NullString
-	err = rows.Scan(&p.ID, &p.Type, &p.ProxyStr, &connectionInfo, &apiKey, &changeUrl, &p.MinTime, &p.Running, &p.Used, &p.Unique, &lastIP, &lastChangedUnix, &errStr, &p.CreatedAt, &p.UpdatedAt)
+	err = rows.Scan(&p.ID, &p.Type, &p.ProxyStr, &apiKey, &changeUrl, &p.MinTime, &p.Running, &p.Used, &p.Unique, &lastIP, &lastChangedUnix, &errStr, &p.CreatedAt, &p.UpdatedAt)
 	rows.Close()
 
 	if err != nil {
@@ -552,9 +522,6 @@ func (pm *ProxyManager) GetAvailableProxy(threadId int) (id int64, proxyStr stri
 		return 0, "", err
 	}
 
-	if connectionInfo.Valid {
-		p.ConnectionInfo = connectionInfo.String
-	}
 	if apiKey.Valid {
 		p.ApiKey = apiKey.String
 	}
@@ -577,10 +544,10 @@ func (pm *ProxyManager) GetAvailableProxy(threadId int) (id int64, proxyStr stri
 		// Sticky: xử lý proxyStr để thay thế ${random}
 		if p.Type == ProxyTypeSticky {
 			processedProxyStr := processStickyProxyStr(p.ProxyStr)
-			return p.ID, pm.getConnectionString(p, processedProxyStr), nil
+			return p.ID, pm.getConnectionString(p.ID, processedProxyStr), nil
 		}
-		// Các loại khác: trả về connection_info hoặc proxyStr
-		return p.ID, pm.getConnectionString(p, p.ProxyStr), nil
+		// Các loại khác: trả về proxyStr hoặc localhost:port
+		return p.ID, pm.getConnectionString(p.ID, p.ProxyStr), nil
 	}
 
 	// Acquire proxy: set running=true và thread_id trước (chưa tăng used)
@@ -625,7 +592,7 @@ func (pm *ProxyManager) GetAvailableProxy(threadId int) (id int64, proxyStr stri
 
 		// Xử lý proxyStr để thay thế ${random}
 		processedProxyStr := processStickyProxyStr(p.ProxyStr)
-		return p.ID, pm.getConnectionString(p, processedProxyStr), nil
+		return p.ID, pm.getConnectionString(p.ID, processedProxyStr), nil
 	}
 
 	// TMProxy: restart nếu đủ điều kiện
@@ -680,15 +647,14 @@ func (pm *ProxyManager) GetAvailableProxy(threadId int) (id int64, proxyStr stri
 		p.UpdatedAt = now
 
 		// Restart dumbproxy instance với upstream mới (nếu IsBlockAssets=true)
-		connectionInfo := pm.restartDumbProxyInstance(p.ID, newProxyStr)
-		p.ConnectionInfo = connectionInfo
+		pm.restartDumbProxyInstance(p.ID, newProxyStr)
 
 		// Đợi ChangeProxyWaitTime trước khi trả result
 		if pm.changeProxyWaitTime > 0 {
 			time.Sleep(pm.changeProxyWaitTime)
 		}
 
-		return p.ID, pm.getConnectionString(p, p.ProxyStr), nil
+		return p.ID, pm.getConnectionString(p.ID, p.ProxyStr), nil
 	}
 
 	// MobileHop: luôn change_url khi lấy proxy (không check canChangeIP)
@@ -727,7 +693,7 @@ func (pm *ProxyManager) GetAvailableProxy(threadId int) (id int64, proxyStr stri
 			time.Sleep(pm.changeProxyWaitTime)
 		}
 
-		return p.ID, pm.getConnectionString(p, p.ProxyStr), nil
+		return p.ID, pm.getConnectionString(p.ID, p.ProxyStr), nil
 	}
 
 	// KiotProxy: restart nếu đủ điều kiện
@@ -788,15 +754,14 @@ func (pm *ProxyManager) GetAvailableProxy(threadId int) (id int64, proxyStr stri
 		p.UpdatedAt = now
 
 		// Restart dumbproxy instance với upstream mới (nếu IsBlockAssets=true)
-		connectionInfo := pm.restartDumbProxyInstance(p.ID, newProxyStr)
-		p.ConnectionInfo = connectionInfo
+		pm.restartDumbProxyInstance(p.ID, newProxyStr)
 
 		// Đợi ChangeProxyWaitTime trước khi trả result
 		if pm.changeProxyWaitTime > 0 {
 			time.Sleep(pm.changeProxyWaitTime)
 		}
 
-		return p.ID, pm.getConnectionString(p, p.ProxyStr), nil
+		return p.ID, pm.getConnectionString(p.ID, p.ProxyStr), nil
 	}
 
 	// IPv4Xoay: restart nếu đủ điều kiện (phương án 3: retry tự động nếu bị block)
@@ -849,15 +814,14 @@ func (pm *ProxyManager) GetAvailableProxy(threadId int) (id int64, proxyStr stri
 		p.UpdatedAt = now
 
 		// Restart dumbproxy instance với upstream mới (nếu IsBlockAssets=true)
-		connectionInfo := pm.restartDumbProxyInstance(p.ID, newProxyStr)
-		p.ConnectionInfo = connectionInfo
+		pm.restartDumbProxyInstance(p.ID, newProxyStr)
 
 		// Đợi ChangeProxyWaitTime trước khi trả result
 		if pm.changeProxyWaitTime > 0 {
 			time.Sleep(pm.changeProxyWaitTime)
 		}
 
-		return p.ID, pm.getConnectionString(p, p.ProxyStr), nil
+		return p.ID, pm.getConnectionString(p.ID, p.ProxyStr), nil
 	}
 
 	// Không đủ điều kiện restart: update used++ và trả về proxy hiện tại
@@ -872,7 +836,7 @@ func (pm *ProxyManager) GetAvailableProxy(threadId int) (id int64, proxyStr stri
 		pm.mu.Unlock()
 	}
 
-	return p.ID, pm.getConnectionString(p, p.ProxyStr), nil
+	return p.ID, pm.getConnectionString(p.ID, p.ProxyStr), nil
 }
 
 // ErrorProxy chứa thông tin proxy bị lỗi
